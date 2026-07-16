@@ -118,32 +118,26 @@ func Start(ctx context.Context, spec Spec, sinks ...Sink) (*Process, error) {
 	cmd.Dir = spec.Dir
 	cmd.Env = mergeEnv(os.Environ(), spec.Env)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("open stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("open stderr pipe: %w", err)
-	}
-
 	started := time.Now()
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("start process: %w", err)
-	}
-
 	proc := &Process{
 		cmd:     cmd,
 		sinks:   sinks,
 		done:    make(chan struct{}),
 		started: started,
 	}
-	emit(ctx, sinks, Event{Type: EventStarted, PID: cmd.Process.Pid, Time: started})
+	outputReady := make(chan struct{})
+	cmd.Stdout = processWriter{ctx: cmdCtx, proc: proc, stream: StreamStdout, ready: outputReady}
+	cmd.Stderr = processWriter{ctx: cmdCtx, proc: proc, stream: StreamStderr, ready: outputReady}
+	if err := cmd.Start(); err != nil {
+		close(outputReady)
+		cancel()
+		return nil, fmt.Errorf("start process: %w", err)
+	}
 
-	go proc.collect(cmdCtx, cancel, stdout, stderr)
+	emit(ctx, sinks, Event{Type: EventStarted, PID: cmd.Process.Pid, Time: started})
+	close(outputReady)
+
+	go proc.collect(cmdCtx, cancel)
 	return proc, nil
 }
 
@@ -173,16 +167,10 @@ func (p *Process) Kill() error {
 	return p.cmd.Process.Kill()
 }
 
-func (p *Process) collect(ctx context.Context, cancel context.CancelFunc, stdout, stderr io.Reader) {
+func (p *Process) collect(ctx context.Context, cancel context.CancelFunc) {
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go p.copyStream(ctx, &wg, stdout, StreamStdout, p.PID())
-	go p.copyStream(ctx, &wg, stderr, StreamStderr, p.PID())
-
 	err := p.cmd.Wait()
-	wg.Wait()
 
 	ended := time.Now()
 	result := Result{
@@ -211,19 +199,23 @@ func (p *Process) collect(ctx context.Context, cancel context.CancelFunc, stdout
 	close(p.done)
 }
 
-func (p *Process) copyStream(ctx context.Context, wg *sync.WaitGroup, r io.Reader, stream Stream, pid int) {
-	defer wg.Done()
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			data := append([]byte(nil), buf[:n]...)
-			p.emit(ctx, Event{Type: EventChunk, Stream: stream, Data: data, PID: pid, Time: time.Now()})
-		}
-		if err != nil {
-			return
-		}
-	}
+type processWriter struct {
+	ctx    context.Context
+	proc   *Process
+	stream Stream
+	ready  <-chan struct{}
+}
+
+func (w processWriter) Write(data []byte) (int, error) {
+	<-w.ready
+	w.proc.emit(w.ctx, Event{
+		Type:   EventChunk,
+		Stream: w.stream,
+		Data:   append([]byte(nil), data...),
+		PID:    w.proc.PID(),
+		Time:   time.Now(),
+	})
+	return len(data), nil
 }
 
 func (p *Process) emit(ctx context.Context, evt Event) {

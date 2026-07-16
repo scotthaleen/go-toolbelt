@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -52,6 +53,33 @@ func TestStartClosesDBOnMigrationError(t *testing.T) {
 	}
 	if store.DB() != nil {
 		t.Fatal("DB() is non-nil after failed start")
+	}
+}
+
+func TestMigrationListIsAtomic(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "atomic.db")
+	store := New(Config{
+		DSN: dsn,
+		Migrations: []string{
+			`create table notes (body text not null)`,
+			`create table broken (`,
+		},
+	})
+	if err := store.Start(context.Background()); err == nil {
+		t.Fatal("Start() error = nil, want migration error")
+	}
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = 'notes'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("first migration remained committed after later failure")
 	}
 }
 
@@ -111,7 +139,11 @@ func TestStartClosesDBOnMigratorError(t *testing.T) {
 }
 
 func TestPoolSettings(t *testing.T) {
-	store := New(Config{MaxOpenConns: 3, MaxIdleConns: 2})
+	store := New(Config{
+		DSN:          "file:pool-settings?mode=memory&cache=shared",
+		MaxOpenConns: 3,
+		MaxIdleConns: 2,
+	})
 	if err := store.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -120,6 +152,31 @@ func TestPoolSettings(t *testing.T) {
 	stats := store.DB().Stats()
 	if stats.MaxOpenConnections != 3 {
 		t.Fatalf("MaxOpenConnections = %d, want 3", stats.MaxOpenConnections)
+	}
+}
+
+func TestMemoryDatabaseRejectsUnsafePoolSettings(t *testing.T) {
+	for _, cfg := range []Config{
+		{MaxOpenConns: 2},
+		{MaxIdleTime: time.Second},
+	} {
+		store := New(cfg)
+		if err := store.Start(context.Background()); err == nil {
+			t.Fatalf("Start(%+v) error = nil, want unsafe :memory: configuration error", cfg)
+		}
+	}
+}
+
+func TestStartJoinsMigratorAndCleanupErrors(t *testing.T) {
+	migrateErr := errors.New("migration failed")
+	closeErr := errors.New("close failed")
+	db := openTestDB(t, closeErr)
+	store := New(Config{Migrate: func(context.Context, *sql.DB) error { return migrateErr }})
+	store.open = func(string, string) (*sql.DB, error) { return db, nil }
+
+	err := store.Start(context.Background())
+	if !errors.Is(err, migrateErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("Start() error = %v, want migration and close errors", err)
 	}
 }
 

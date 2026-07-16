@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -43,6 +44,27 @@ func TestRunStreamsStdoutAndStderr(t *testing.T) {
 	}
 	if events[len(events)-1] != EventCompleted {
 		t.Fatalf("last event = %v, want completed", events[len(events)-1])
+	}
+}
+
+func TestRunDrainsLargeStdoutAndStderr(t *testing.T) {
+	const streamSize = 4 << 20
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	result := Run(
+		context.Background(),
+		testSpec("large"),
+		WriterSink{Stdout: &stdout, Stderr: &stderr},
+	)
+	if result.Err != nil {
+		t.Fatalf("Run() error = %v", result.Err)
+	}
+	if stdout.Len() != streamSize || bytes.Count(stdout.Bytes(), []byte{'O'}) != streamSize {
+		t.Fatalf("stdout length/content invalid: length = %d, want %d O bytes", stdout.Len(), streamSize)
+	}
+	if stderr.Len() != streamSize || bytes.Count(stderr.Bytes(), []byte{'E'}) != streamSize {
+		t.Fatalf("stderr length/content invalid: length = %d, want %d E bytes", stderr.Len(), streamSize)
 	}
 }
 
@@ -162,6 +184,20 @@ func TestHelperProcess(t *testing.T) {
 		}
 	case "long":
 		fmt.Fprintln(os.Stdout, "0123456789")
+		os.Exit(0)
+	case "large":
+		const streamSize = 4 << 20
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = os.Stdout.Write(bytes.Repeat([]byte{'O'}, streamSize))
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = os.Stderr.Write(bytes.Repeat([]byte{'E'}, streamSize))
+		}()
+		wg.Wait()
 		os.Exit(0)
 	default:
 		os.Exit(2)

@@ -3,6 +3,8 @@
 //
 // Store opens and verifies the pool, runs configured SQL statements and an
 // optional Migrator during startup, and closes the pool during shutdown.
+// Configured SQL statements run atomically in a single transaction.
+// Statements that cannot run transactionally belong in Migrator instead.
 // Applications can use Migrator to integrate Goose or another versioned
 // migration system without adding that dependency to this package. Start and
 // Stop must not be called concurrently. DB returns nil before successful

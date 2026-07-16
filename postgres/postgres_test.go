@@ -141,6 +141,22 @@ func TestStartClosesDBOnMigratorError(t *testing.T) {
 	}
 }
 
+func TestStartJoinsMigratorAndCleanupErrors(t *testing.T) {
+	migrateErr := errors.New("migration failed")
+	closeErr := errors.New("close failed")
+	db := openTestDB(t, closeErr)
+	store := New(Config{
+		DSN:     "unused",
+		Migrate: func(context.Context, *sql.DB) error { return migrateErr },
+	})
+	store.open = func(string, string) (*sql.DB, error) { return db, nil }
+
+	err := store.Start(context.Background())
+	if !errors.Is(err, migrateErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("Start() error = %v, want migration and close errors", err)
+	}
+}
+
 func TestStopWithCanceledContextStillClosesDB(t *testing.T) {
 	store := New(Config{DSN: "unused"})
 	store.db = openTestDB(t, nil)

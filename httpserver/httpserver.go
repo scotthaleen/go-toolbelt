@@ -139,6 +139,10 @@ func (s *Server) Stop(ctx context.Context) error {
 		return nil
 	}
 	shutdownErr := s.server.Shutdown(ctx)
+	var closeErr error
+	if shutdownErr != nil {
+		closeErr = s.server.Close()
+	}
 	if s.serveDone != nil {
 		select {
 		case <-s.serveDone:
@@ -149,5 +153,5 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.errMu.Lock()
 	serveErr := s.serveErr
 	s.errMu.Unlock()
-	return errors.Join(shutdownErr, serveErr)
+	return errors.Join(shutdownErr, closeErr, serveErr)
 }

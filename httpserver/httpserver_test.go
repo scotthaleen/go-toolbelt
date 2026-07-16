@@ -152,6 +152,56 @@ func TestServerGracefulShutdownWaitsForRequest(t *testing.T) {
 	}
 }
 
+func TestServerForceClosesAfterShutdownDeadline(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := New(Config{Addr: "127.0.0.1:0"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		_, _ = io.WriteString(w, "late")
+	}))
+	ctx, _ := serverContext(t)
+	if err := server.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	requestDone := make(chan error, 1)
+	go func() {
+		client := &http.Client{Timeout: time.Second}
+		response, err := client.Get("http://" + server.Addr().String())
+		if err == nil {
+			_, err = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach handler")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := server.Stop(stopCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop() error = %v, want context.DeadlineExceeded", err)
+	}
+	select {
+	case <-server.serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("Serve() remained active after forced close")
+	}
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("request completed successfully after forced close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client connection remained active after forced close")
+	}
+	close(release)
+}
+
 func TestServerOccupiedAddressFailsStart(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

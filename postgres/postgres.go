@@ -97,20 +97,15 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("ping postgres: %w", err)
+		return closeAfterStartError(db, fmt.Errorf("ping postgres: %w", err))
 	}
 
-	for _, migration := range s.cfg.Migrations {
-		if _, err := db.ExecContext(ctx, migration); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("run postgres migration: %w", err)
-		}
+	if err := runMigrations(ctx, db, s.cfg.Migrations); err != nil {
+		return closeAfterStartError(db, fmt.Errorf("run postgres migrations: %w", err))
 	}
 	if s.cfg.Migrate != nil {
 		if err := s.cfg.Migrate(ctx, db); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("migrate postgres: %w", err)
+			return closeAfterStartError(db, fmt.Errorf("migrate postgres: %w", err))
 		}
 	}
 
@@ -118,6 +113,33 @@ func (s *Store) Start(ctx context.Context) error {
 	s.db = db
 	s.mu.Unlock()
 	return nil
+}
+
+func runMigrations(ctx context.Context, db *sql.DB, migrations []string) error {
+	if len(migrations) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	for _, migration := range migrations {
+		if _, err := tx.ExecContext(ctx, migration); err != nil {
+			return errors.Join(err, tx.Rollback())
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
+
+func closeAfterStartError(db *sql.DB, startErr error) error {
+	closeErr := db.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close postgres after startup failure: %w", closeErr)
+	}
+	return errors.Join(startErr, closeErr)
 }
 
 func (s *Store) Stop(ctx context.Context) error {

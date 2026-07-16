@@ -137,24 +137,86 @@ func (s Store) Put(ctx context.Context, path string) (Stored, error) {
 	if err != nil {
 		return Stored{}, err
 	}
-	if _, err := os.Stat(storePath); err == nil {
-		return Stored{Artifact: a, StorePath: storePath, AlreadyExists: true}, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if exists, err := validateStoredArtifact(storePath, a.SHA256, a.Size); err != nil {
 		return Stored{}, err
+	} else if exists {
+		return Stored{Artifact: a, StorePath: storePath, AlreadyExists: true}, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(storePath), 0o755); err != nil {
 		return Stored{}, err
 	}
 
-	if err := os.Rename(tmpPath, storePath); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return Stored{Artifact: a, StorePath: storePath, AlreadyExists: true}, nil
+	for {
+		if err := ctx.Err(); err != nil {
+			return Stored{}, err
 		}
-		return Stored{}, err
+		if err := os.Link(tmpPath, storePath); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				exists, validateErr := validateStoredArtifact(storePath, a.SHA256, a.Size)
+				if validateErr != nil {
+					return Stored{}, validateErr
+				}
+				if !exists {
+					continue
+				}
+				return Stored{Artifact: a, StorePath: storePath, AlreadyExists: true}, nil
+			}
+			return Stored{}, fmt.Errorf("publish artifact: %w", err)
+		}
+		break
 	}
 
 	return Stored{Artifact: a, StorePath: storePath}, nil
+}
+
+func validateStoredArtifact(path, wantSHA string, wantSize int64) (bool, error) {
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !before.Mode().IsRegular() {
+		return false, fmt.Errorf("stored artifact %s is not a regular file", path)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return false, fmt.Errorf("stored artifact %s changed during validation", path)
+	}
+	gotSHA, gotSize, err := Digest(file)
+	if err != nil {
+		return false, err
+	}
+	if gotSize != wantSize || gotSHA != wantSHA {
+		return false, fmt.Errorf("stored artifact %s does not match digest %s", path, wantSHA)
+	}
+	validated, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if validated.Size() != opened.Size() || !validated.ModTime().Equal(opened.ModTime()) {
+		return false, fmt.Errorf("stored artifact %s changed during validation", path)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(opened, after) ||
+		after.Size() != validated.Size() || !after.ModTime().Equal(validated.ModTime()) {
+		return false, fmt.Errorf("stored artifact %s changed during validation", path)
+	}
+	return true, nil
 }
 
 func copyAndDigest(ctx context.Context, dst io.Writer, src io.Reader) (string, int64, error) {

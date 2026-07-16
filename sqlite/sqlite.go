@@ -29,6 +29,7 @@ type Store struct {
 	mu      sync.RWMutex
 	db      *sql.DB
 	closing *closeState
+	open    func(string, string) (*sql.DB, error)
 }
 
 type closeState struct {
@@ -43,7 +44,7 @@ func New(cfg Config) *Store {
 	if cfg.MaxOpenConns == 0 {
 		cfg.MaxOpenConns = 1
 	}
-	return &Store{cfg: cfg}
+	return &Store{cfg: cfg, open: sql.Open}
 }
 
 func (s *Store) Component() *app.Component {
@@ -61,6 +62,9 @@ func (s *Store) DB() *sql.DB {
 }
 
 func (s *Store) Start(ctx context.Context) error {
+	if s.cfg.DSN == ":memory:" && (s.cfg.MaxOpenConns != 1 || s.cfg.MaxIdleTime > 0) {
+		return errors.New("sqlite :memory: requires one open connection and no idle timeout")
+	}
 	s.mu.Lock()
 	if s.db != nil {
 		s.mu.Unlock()
@@ -81,7 +85,7 @@ func (s *Store) Start(ctx context.Context) error {
 		}
 	}
 	s.mu.Unlock()
-	db, err := sql.Open("sqlite", s.cfg.DSN)
+	db, err := s.open("sqlite", s.cfg.DSN)
 	if err != nil {
 		return fmt.Errorf("open sqlite: %w", err)
 	}
@@ -97,20 +101,15 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("ping sqlite: %w", err)
+		return closeAfterStartError(db, fmt.Errorf("ping sqlite: %w", err))
 	}
 
-	for _, migration := range s.cfg.Migrations {
-		if _, err := db.ExecContext(ctx, migration); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("run sqlite migration: %w", err)
-		}
+	if err := runMigrations(ctx, db, s.cfg.Migrations); err != nil {
+		return closeAfterStartError(db, fmt.Errorf("run sqlite migrations: %w", err))
 	}
 	if s.cfg.Migrate != nil {
 		if err := s.cfg.Migrate(ctx, db); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("migrate sqlite: %w", err)
+			return closeAfterStartError(db, fmt.Errorf("migrate sqlite: %w", err))
 		}
 	}
 
@@ -118,6 +117,33 @@ func (s *Store) Start(ctx context.Context) error {
 	s.db = db
 	s.mu.Unlock()
 	return nil
+}
+
+func runMigrations(ctx context.Context, db *sql.DB, migrations []string) error {
+	if len(migrations) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	for _, migration := range migrations {
+		if _, err := tx.ExecContext(ctx, migration); err != nil {
+			return errors.Join(err, tx.Rollback())
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
+
+func closeAfterStartError(db *sql.DB, startErr error) error {
+	closeErr := db.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close sqlite after startup failure: %w", closeErr)
+	}
+	return errors.Join(startErr, closeErr)
 }
 
 func (s *Store) Stop(ctx context.Context) error {
