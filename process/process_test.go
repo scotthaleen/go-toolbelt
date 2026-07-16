@@ -3,11 +3,13 @@ package process
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,6 +48,27 @@ func TestRunStreamsStdoutAndStderr(t *testing.T) {
 	}
 }
 
+func TestRunDrainsLargeStdoutAndStderr(t *testing.T) {
+	const streamSize = 4 << 20
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	result := Run(
+		context.Background(),
+		testSpec("large"),
+		WriterSink{Stdout: &stdout, Stderr: &stderr},
+	)
+	if result.Err != nil {
+		t.Fatalf("Run() error = %v", result.Err)
+	}
+	if stdout.Len() != streamSize || bytes.Count(stdout.Bytes(), []byte{'O'}) != streamSize {
+		t.Fatalf("stdout length/content invalid: length = %d, want %d O bytes", stdout.Len(), streamSize)
+	}
+	if stderr.Len() != streamSize || bytes.Count(stderr.Bytes(), []byte{'E'}) != streamSize {
+		t.Fatalf("stderr length/content invalid: length = %d, want %d E bytes", stderr.Len(), streamSize)
+	}
+}
+
 func TestRunReportsFailure(t *testing.T) {
 	result := Run(context.Background(), testSpec("fail"))
 
@@ -68,6 +91,21 @@ func TestRunCancelsOnContext(t *testing.T) {
 	}
 	if result.Err == nil {
 		t.Fatal("expected cancellation error")
+	}
+	if !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("result error = %v, want context.DeadlineExceeded", result.Err)
+	}
+}
+
+func TestRunSpecTimeoutPreservesDeadlineError(t *testing.T) {
+	spec := testSpec("sleep")
+	spec.Timeout = 100 * time.Millisecond
+	result := Run(context.Background(), spec)
+	if !result.Canceled {
+		t.Fatal("expected canceled result")
+	}
+	if !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("result error = %v, want context.DeadlineExceeded", result.Err)
 	}
 }
 
@@ -162,6 +200,20 @@ func TestHelperProcess(t *testing.T) {
 		}
 	case "long":
 		fmt.Fprintln(os.Stdout, "0123456789")
+		os.Exit(0)
+	case "large":
+		const streamSize = 4 << 20
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = os.Stdout.Write(bytes.Repeat([]byte{'O'}, streamSize))
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = os.Stderr.Write(bytes.Repeat([]byte{'E'}, streamSize))
+		}()
+		wg.Wait()
 		os.Exit(0)
 	default:
 		os.Exit(2)

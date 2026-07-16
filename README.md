@@ -10,10 +10,17 @@ Packages here may evolve faster than the stable `go-app` lifecycle core as appli
 - `artifact`: content hash metadata and content-addressed filesystem staging.
 - `echoserver`: Echo router and HTTP server components.
 - `eventbus`: typed, best-effort in-process event fan-out.
+- `httpserver`: router-independent standard-library HTTP server lifecycle.
 - `logging`: `log/slog` setup helpers, including `-v/-vv/-vvv` style verbosity mapping.
 - `postgres`: a small `go-app` component that owns a Postgres `*sql.DB` lifecycle through `pgx`.
 - `process`: streaming process execution with event sinks and cancellation.
 - `sqlite`: a small `go-app` component that owns a SQLite `*sql.DB` lifecycle.
+
+The SQLite and PostgreSQL components accept application-owned migration
+callbacks, allowing integration with Goose or another versioned migration
+system without requiring it as a toolbelt dependency. Logging supports Tint,
+plain text, and JSON, with automatic Tint output on terminals and JSON
+otherwise.
 
 ## Documentation
 
@@ -48,6 +55,14 @@ The advanced jobs example demonstrates a capability component plus delivery adap
 The server does not know about the job manager. The adapters resolve the dependencies they need during component startup, then runtime handlers use captured fields rather than reaching back into the app registry.
 
 ## Development
+
+This module targets Go 1.26.4. Consumers using an older Go version must update
+their declared version or enable the corresponding Go toolchain before adopting
+the module.
+
+The toolbelt intentionally remains a single Go module. Importing a subset of
+its packages may therefore add dependencies used by other packages to module
+resolution, although the Go linker excludes unused package code from binaries.
 
 ```sh
 task fmt

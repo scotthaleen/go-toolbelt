@@ -2,12 +2,14 @@ package logging
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/lmittmann/tint"
 	"golang.org/x/term"
 )
 
@@ -16,10 +18,11 @@ type requestIDContextKey struct{}
 var requestIDKey requestIDContextKey
 
 type Config struct {
-	Verbosity int
-	Output    io.Writer
-	Format    Format
-	AddSource bool
+	Verbosity   int
+	Output      io.Writer
+	Format      Format
+	AddSource   bool
+	ReplaceAttr func(groups []string, attr slog.Attr) slog.Attr
 }
 
 type Format string
@@ -27,6 +30,7 @@ type Format string
 const (
 	FormatAuto Format = "auto"
 	FormatText Format = "text"
+	FormatTint Format = "tint"
 	FormatJSON Format = "json"
 )
 
@@ -47,30 +51,38 @@ func LevelFromVerbosity(v int) slog.Level {
 	}
 }
 
-func NewLogger(cfg Config) *slog.Logger {
-	return slog.New(NewHandler(cfg))
+func NewLogger(cfg Config) (*slog.Logger, error) {
+	handler, err := NewHandler(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return slog.New(handler), nil
 }
 
-func NewHandler(cfg Config) slog.Handler {
+func NewHandler(cfg Config) (slog.Handler, error) {
 	out := cfg.Output
 	if out == nil {
 		out = os.Stdout
 	}
 
+	replaceAttr := func(groups []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
+			a = slog.String(a.Key, a.Value.Time().UTC().Format(time.RFC3339Nano))
+		}
+		if a.Key == slog.SourceKey {
+			if source, ok := a.Value.Any().(*slog.Source); ok && source != nil {
+				source.File = filepath.Base(source.File)
+			}
+		}
+		if cfg.ReplaceAttr != nil {
+			a = cfg.ReplaceAttr(groups, a)
+		}
+		return a
+	}
 	opts := &slog.HandlerOptions{
-		Level:     LevelFromVerbosity(cfg.Verbosity),
-		AddSource: cfg.AddSource,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.String(a.Key, a.Value.Time().UTC().Format(time.RFC3339Nano))
-			}
-			if a.Key == slog.SourceKey {
-				if source, ok := a.Value.Any().(*slog.Source); ok && source != nil {
-					source.File = filepath.Base(source.File)
-				}
-			}
-			return a
-		},
+		Level:       LevelFromVerbosity(cfg.Verbosity),
+		AddSource:   cfg.AddSource,
+		ReplaceAttr: replaceAttr,
 	}
 
 	var handler slog.Handler
@@ -79,22 +91,41 @@ func NewHandler(cfg Config) slog.Handler {
 		handler = slog.NewJSONHandler(out, opts)
 	case FormatText:
 		handler = slog.NewTextHandler(out, opts)
+	case FormatTint:
+		handler = newTintHandler(out, cfg, replaceAttr)
 	case FormatAuto, "":
-		if file, ok := out.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
-			handler = slog.NewTextHandler(out, opts)
+		if isTerminal(out) {
+			handler = newTintHandler(out, cfg, replaceAttr)
 		} else {
 			handler = slog.NewJSONHandler(out, opts)
 		}
 	default:
-		handler = slog.NewTextHandler(out, opts)
+		return nil, fmt.Errorf("logging: unsupported format %q", cfg.Format)
 	}
-	return ContextHandler{next: handler}
+	return ContextHandler{next: handler}, nil
 }
 
-func Setup(cfg Config) *slog.Logger {
-	logger := NewLogger(cfg)
+func newTintHandler(out io.Writer, cfg Config, replaceAttr func([]string, slog.Attr) slog.Attr) slog.Handler {
+	return tint.NewHandler(out, &tint.Options{
+		Level:       LevelFromVerbosity(cfg.Verbosity),
+		AddSource:   cfg.AddSource,
+		ReplaceAttr: replaceAttr,
+		NoColor:     !isTerminal(out),
+	})
+}
+
+var isTerminal = func(out io.Writer) bool {
+	file, ok := out.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
+func Setup(cfg Config) (*slog.Logger, error) {
+	logger, err := NewLogger(cfg)
+	if err != nil {
+		return nil, err
+	}
 	slog.SetDefault(logger)
-	return logger
+	return logger, nil
 }
 
 func WithRequestID(ctx context.Context, requestID string) context.Context {

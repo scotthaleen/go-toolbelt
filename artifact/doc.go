@@ -9,7 +9,9 @@
 // Because the destination depends only on content, putting identical files
 // reuses one stored copy regardless of their original names or locations. The
 // returned Artifact retains source metadata, while StorePath identifies the
-// durable copy.
+// durable copy. Existing entries must be regular files with the expected size
+// and digest. Atomic publication requires hard-link support in the store
+// filesystem.
 //
 // This package is useful as a building block for workflows that need to stage
 // immutable inputs, cache generated files, or refer to files by content rather

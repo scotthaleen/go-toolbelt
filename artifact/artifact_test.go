@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -80,6 +81,114 @@ func TestStorePutRequiresRoot(t *testing.T) {
 	_, err := (Store{}).Put(context.Background(), filepath.Join(t.TempDir(), "missing"))
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestStorePutRejectsCorruptExistingArtifact(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "input.txt")
+	contents := []byte("expected")
+	if err := os.WriteFile(source, contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	store := Store{Root: filepath.Join(dir, "store")}
+	destination, err := store.Path(hex.EncodeToString(digest[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("corrupt!"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.Put(context.Background(), source); err == nil {
+		t.Fatal("Put() error = nil, want corrupt destination error")
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "corrupt!" {
+		t.Fatalf("destination was overwritten with %q", got)
+	}
+}
+
+func TestStorePutRejectsSymlinkAndDirectoryDestinations(t *testing.T) {
+	for _, kind := range []string{"symlink", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, "input.txt")
+			contents := []byte("expected")
+			if err := os.WriteFile(source, contents, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(contents)
+			store := Store{Root: filepath.Join(dir, "store")}
+			destination, err := store.Path(hex.EncodeToString(digest[:]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "symlink" {
+				target := filepath.Join(dir, "target")
+				if err := os.WriteFile(target, contents, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, destination); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			} else if err := os.Mkdir(destination, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := store.Put(context.Background(), source); err == nil {
+				t.Fatalf("Put() error = nil, want %s destination error", kind)
+			}
+		})
+	}
+}
+
+func TestStorePutConcurrentPublication(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "input.txt")
+	if err := os.WriteFile(source, []byte("concurrent artifact"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{Root: filepath.Join(dir, "store")}
+	const writers = 8
+	results := make(chan Stored, writers)
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stored, err := store.Put(context.Background(), source)
+			results <- stored
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Put() error = %v", err)
+		}
+	}
+	created := 0
+	for stored := range results {
+		if !stored.AlreadyExists {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("new publications = %d, want 1", created)
 	}
 }
 

@@ -2,14 +2,12 @@ package echoserver
 
 import (
 	"context"
-	"errors"
-	"log/slog"
 	"net"
-	"net/http"
 	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/scotthaleen/go-app"
+	"github.com/scotthaleen/go-toolbelt/httpserver"
 )
 
 type Config struct {
@@ -49,8 +47,9 @@ func (r *Router) Start(ctx context.Context) error {
 }
 
 type Server struct {
-	cfg    Config
-	server *http.Server
+	cfg       Config
+	listener  net.Listener
+	transport *httpserver.Server
 }
 
 func New(cfg Config) *Server {
@@ -70,36 +69,23 @@ func (s *Server) Component() *app.Component {
 
 func (s *Server) Start(ctx context.Context) error {
 	router := app.MustGet[*Router](ctx)
-	runtime := app.MustGet[app.RuntimeContext](ctx)
-	requestShutdown := app.MustGet[app.RequestShutdownFunc](ctx)
-
-	listener, err := net.Listen("tcp", s.cfg.Addr)
-	if err != nil {
-		return err
+	opts := make([]httpserver.Option, 0, 1)
+	if s.listener != nil {
+		opts = append(opts, httpserver.WithListener(s.listener))
 	}
-
-	s.server = &http.Server{
-		Handler:           router.Echo(),
+	s.transport = httpserver.New(httpserver.Config{
+		Addr:              s.cfg.Addr,
 		ReadTimeout:       s.cfg.ReadTimeout,
 		ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
 		WriteTimeout:      s.cfg.WriteTimeout,
 		IdleTimeout:       s.cfg.IdleTimeout,
-	}
-
-	go func() {
-		if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.ErrorContext(runtime, "echo server failed", "reason", err)
-			requestShutdown()
-		}
-	}()
-
-	slog.InfoContext(ctx, "echo server listening", "addr", listener.Addr().String())
-	return nil
+	}, router.Echo(), opts...)
+	return s.transport.Start(ctx)
 }
 
 func (s *Server) Stop(ctx context.Context) error {
-	if s.server == nil {
+	if s.transport == nil {
 		return nil
 	}
-	return s.server.Shutdown(ctx)
+	return s.transport.Stop(ctx)
 }

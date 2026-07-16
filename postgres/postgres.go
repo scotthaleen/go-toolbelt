@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/scotthaleen/go-app"
@@ -15,18 +16,30 @@ import (
 type Config struct {
 	DSN          string
 	Migrations   []string
+	Migrate      Migrator
 	MaxOpenConns int
 	MaxIdleConns int
 	MaxIdleTime  time.Duration
 }
 
+// Migrator initializes or upgrades an opened database during startup.
+type Migrator func(context.Context, *sql.DB) error
+
 type Store struct {
-	cfg Config
-	db  *sql.DB
+	cfg     Config
+	mu      sync.RWMutex
+	db      *sql.DB
+	closing *closeState
+	open    func(string, string) (*sql.DB, error)
+}
+
+type closeState struct {
+	done chan struct{}
+	err  error
 }
 
 func New(cfg Config) *Store {
-	return &Store{cfg: cfg}
+	return &Store{cfg: cfg, open: sql.Open}
 }
 
 func (s *Store) Component() *app.Component {
@@ -37,14 +50,38 @@ func (s *Store) Component() *app.Component {
 	)
 }
 
-func (s *Store) DB() *sql.DB { return s.db }
+func (s *Store) DB() *sql.DB {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.db
+}
 
 func (s *Store) Start(ctx context.Context) error {
 	if s.cfg.DSN == "" {
 		return errors.New("postgres dsn is required")
 	}
+	s.mu.Lock()
+	if s.db != nil {
+		s.mu.Unlock()
+		return errors.New("postgres already started")
+	}
+	if s.closing != nil {
+		select {
+		case <-s.closing.done:
+			closeErr := s.closing.err
+			s.closing = nil
+			if closeErr != nil {
+				s.mu.Unlock()
+				return fmt.Errorf("previous postgres shutdown: %w", closeErr)
+			}
+		default:
+			s.mu.Unlock()
+			return errors.New("postgres shutdown in progress")
+		}
+	}
+	s.mu.Unlock()
 
-	db, err := sql.Open("pgx", s.cfg.DSN)
+	db, err := s.open("pgx", s.cfg.DSN)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
@@ -60,31 +97,80 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("ping postgres: %w", err)
+		return closeAfterStartError(db, fmt.Errorf("ping postgres: %w", err))
 	}
 
-	for _, migration := range s.cfg.Migrations {
-		if _, err := db.ExecContext(ctx, migration); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("run postgres migration: %w", err)
+	if err := runMigrations(ctx, db, s.cfg.Migrations); err != nil {
+		return closeAfterStartError(db, fmt.Errorf("run postgres migrations: %w", err))
+	}
+	if s.cfg.Migrate != nil {
+		if err := s.cfg.Migrate(ctx, db); err != nil {
+			return closeAfterStartError(db, fmt.Errorf("migrate postgres: %w", err))
 		}
 	}
 
+	s.mu.Lock()
 	s.db = db
+	s.mu.Unlock()
 	return nil
 }
 
-func (s *Store) Stop(ctx context.Context) error {
-	if s.db == nil {
+func runMigrations(ctx context.Context, db *sql.DB, migrations []string) error {
+	if len(migrations) == 0 {
 		return nil
 	}
-	done := make(chan error, 1)
-	go func() { done <- s.db.Close() }()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	for _, migration := range migrations {
+		if _, err := tx.ExecContext(ctx, migration); err != nil {
+			return errors.Join(err, tx.Rollback())
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
+
+func closeAfterStartError(db *sql.DB, startErr error) error {
+	closeErr := db.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close postgres after startup failure: %w", closeErr)
+	}
+	return errors.Join(startErr, closeErr)
+}
+
+func (s *Store) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	closing := s.closing
+	if closing == nil {
+		if s.db == nil {
+			s.mu.Unlock()
+			return nil
+		}
+		db := s.db
+		s.db = nil
+		closing = &closeState{done: make(chan struct{})}
+		s.closing = closing
+		s.mu.Unlock()
+		go func() {
+			closing.err = db.Close()
+			close(closing.done)
+		}()
+	} else {
+		s.mu.Unlock()
+	}
 
 	select {
-	case err := <-done:
-		return err
+	case <-closing.done:
+		s.mu.Lock()
+		if s.closing == closing {
+			s.closing = nil
+		}
+		s.mu.Unlock()
+		return errors.Join(closing.err, ctx.Err())
 	case <-ctx.Done():
 		return ctx.Err()
 	}

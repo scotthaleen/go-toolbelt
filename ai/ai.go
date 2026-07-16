@@ -21,6 +21,9 @@ type Client struct {
 }
 
 func New(cfg Config) *Client {
+	if cfg.Model == "" {
+		cfg.Model = "gpt-4.1-mini"
+	}
 	return &Client{cfg: cfg}
 }
 
@@ -35,10 +38,6 @@ func (c *Client) Start(ctx context.Context) error {
 	if c.cfg.APIKey == "" {
 		return fmt.Errorf("openai api key is required")
 	}
-	if c.cfg.Model == "" {
-		c.cfg.Model = "openai/gpt-4.1-mini"
-	}
-
 	provider, err := openai.New(openai.WithAPIKey(c.cfg.APIKey), openai.WithUseResponsesAPI())
 	if err != nil {
 		return fmt.Errorf("create openai provider: %w", err)
