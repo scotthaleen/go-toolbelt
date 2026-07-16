@@ -1,0 +1,14 @@
+.DS_Store
+/go-toolbelt
+*.test
+*.out
+coverage.out
+dist/
+bin/
+/notes/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
