@@ -13,10 +13,14 @@ import (
 type Config struct {
 	DSN          string
 	Migrations   []string
+	Migrate      Migrator
 	MaxOpenConns int
 	MaxIdleConns int
 	MaxIdleTime  time.Duration
 }
+
+// Migrator initializes or upgrades an opened database during startup.
+type Migrator func(context.Context, *sql.DB) error
 
 type Store struct {
 	cfg Config
@@ -68,6 +72,12 @@ func (s *Store) Start(ctx context.Context) error {
 		if _, err := db.ExecContext(ctx, migration); err != nil {
 			_ = db.Close()
 			return fmt.Errorf("run sqlite migration: %w", err)
+		}
+	}
+	if s.cfg.Migrate != nil {
+		if err := s.cfg.Migrate(ctx, db); err != nil {
+			_ = db.Close()
+			return fmt.Errorf("migrate sqlite: %w", err)
 		}
 	}
 

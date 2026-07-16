@@ -50,3 +50,12 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
 - `examples/sqlite`: minimal lifecycle component usage.
 - `examples/advanced-jobs`: capability plus HTTP and CLI adapters.
 - `examples/ai-cli`: AI component wrapping Charm Fantasy for a single CLI prompt.
+
+## Infrastructure Components
+
+- Use `sqlite.Config.Migrate` or `postgres.Config.Migrate` to integrate an
+  application-owned versioned migration system such as Goose.
+- Use `httpserver` when an application supplies a standard `http.Handler`; the
+  application continues to own routing and middleware.
+- Use `logging.FormatAuto` for Tint on terminals and JSON elsewhere, or select
+  `FormatTint`, `FormatText`, or `FormatJSON` explicitly.

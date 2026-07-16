@@ -6,6 +6,7 @@ require (
 	charm.land/fantasy v0.35.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/labstack/echo/v4 v4.15.4
+	github.com/lmittmann/tint v1.2.0
 	github.com/scotthaleen/go-app v1.0.0
 	golang.org/x/term v0.44.0
 	modernc.org/sqlite v1.53.0
