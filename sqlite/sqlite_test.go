@@ -3,8 +3,10 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestStartRunsMigrationsAndStopClosesDB(t *testing.T) {
@@ -31,10 +33,14 @@ func TestStartRunsMigrationsAndStopClosesDB(t *testing.T) {
 		t.Fatalf("count = %d, want 1", count)
 	}
 
+	db := store.DB()
 	if err := store.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
-	if err := store.DB().PingContext(context.Background()); err == nil {
+	if store.DB() != nil {
+		t.Fatal("DB() is non-nil after Stop")
+	}
+	if err := db.PingContext(context.Background()); err == nil {
 		t.Fatal("PingContext() error = nil after Stop, want closed DB")
 	}
 }
@@ -136,6 +142,99 @@ func TestStopIsRepeatable(t *testing.T) {
 	}
 }
 
+func TestStartRejectsAlreadyStartedStore(t *testing.T) {
+	store := New(Config{})
+	if err := store.Start(context.Background()); err != nil {
+		t.Fatalf("first Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Stop(context.Background()) })
+	db := store.DB()
+	if err := store.Start(context.Background()); err == nil {
+		t.Fatal("second Start() error = nil, want already started error")
+	}
+	if store.DB() != db {
+		t.Fatal("second Start() replaced the database")
+	}
+}
+
+func TestStopWithCanceledContextStillClosesDB(t *testing.T) {
+	store := New(Config{})
+	if err := store.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	db := store.DB()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.Stop(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop() error = %v, want context.Canceled", err)
+	}
+	if store.DB() != nil {
+		t.Fatal("DB() is non-nil after Stop")
+	}
+	if err := store.Stop(context.Background()); err != nil {
+		t.Fatalf("second Stop() error = %v", err)
+	}
+	if err := db.PingContext(context.Background()); err == nil {
+		t.Fatal("database remains open after Stop")
+	}
+}
+
+func TestStopRespectsContextDeadline(t *testing.T) {
+	release := make(chan struct{})
+	store := New(Config{})
+	store.db = openBlockingTestDB(t, release)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	if err := store.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop() error = %v, want context.DeadlineExceeded", err)
+	}
+	if store.DB() != nil {
+		t.Fatal("DB() is non-nil while close finishes")
+	}
+	close(release)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+	defer waitCancel()
+	if err := store.Stop(waitCtx); err != nil {
+		t.Fatalf("second Stop() error = %v", err)
+	}
+}
+
+func TestStartReportsCompletedCloseError(t *testing.T) {
+	wantErr := errors.New("close failed")
+	release := make(chan struct{})
+	store := New(Config{})
+	store.db = sql.OpenDB(testConnector{closeErr: wantErr, closeWait: release})
+	if err := store.db.PingContext(context.Background()); err != nil {
+		t.Fatalf("PingContext() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.Stop(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop() error = %v, want context.Canceled", err)
+	}
+	closing := store.closing
+	close(release)
+	<-closing.done
+
+	if err := store.Start(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Start() error = %v, want errors.Is(_, %v)", err, wantErr)
+	}
+}
+
+func TestStopClearsDBOnCloseError(t *testing.T) {
+	wantErr := errors.New("close failed")
+	store := New(Config{})
+	store.db = openTestDB(t, wantErr)
+
+	if err := store.Stop(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Stop() error = %v, want errors.Is(_, %v)", err, wantErr)
+	}
+	if store.DB() != nil {
+		t.Fatal("DB() is non-nil after Stop")
+	}
+}
+
 func TestDefaultStoresUsePrivateDatabases(t *testing.T) {
 	first := New(Config{Migrations: []string{`create table notes (body text not null)`}})
 	second := New(Config{})
@@ -150,3 +249,58 @@ func TestDefaultStoresUsePrivateDatabases(t *testing.T) {
 		t.Fatal("second default store can see first store's schema")
 	}
 }
+
+func openTestDB(t *testing.T, closeErr error) *sql.DB {
+	t.Helper()
+	db := sql.OpenDB(testConnector{closeErr: closeErr})
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("PingContext() error = %v", err)
+	}
+	return db
+}
+
+func openBlockingTestDB(t *testing.T, closeWait <-chan struct{}) *sql.DB {
+	t.Helper()
+	db := sql.OpenDB(testConnector{closeWait: closeWait})
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("PingContext() error = %v", err)
+	}
+	return db
+}
+
+type testConnector struct {
+	closeErr  error
+	closeWait <-chan struct{}
+}
+
+func (c testConnector) Connect(context.Context) (driver.Conn, error) {
+	return testConn{closeErr: c.closeErr, closeWait: c.closeWait}, nil
+}
+
+func (c testConnector) Driver() driver.Driver {
+	return testDriver{closeErr: c.closeErr, closeWait: c.closeWait}
+}
+
+type testDriver struct {
+	closeErr  error
+	closeWait <-chan struct{}
+}
+
+func (d testDriver) Open(string) (driver.Conn, error) {
+	return testConn{closeErr: d.closeErr, closeWait: d.closeWait}, nil
+}
+
+type testConn struct {
+	closeErr  error
+	closeWait <-chan struct{}
+}
+
+func (c testConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("not implemented") }
+func (c testConn) Close() error {
+	if c.closeWait != nil {
+		<-c.closeWait
+	}
+	return c.closeErr
+}
+func (c testConn) Begin() (driver.Tx, error)  { return nil, errors.New("not implemented") }
+func (c testConn) Ping(context.Context) error { return nil }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,12 +186,75 @@ func TestServerRequestsShutdownOnServeFailure(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("serve failure did not request shutdown")
 	}
+	if err := server.Stop(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Stop() error = %v, want errors.Is(_, %v)", err, wantErr)
+	}
+}
+
+func TestAppRunReturnsServeFailure(t *testing.T) {
+	wantErr := errors.New("accept failed")
+	server := New(Config{}, http.NotFoundHandler(), WithListener(&errorListener{err: wantErr}))
+	application := app.New(
+		context.Background(),
+		app.WithSignalHandling(false),
+		app.WithSequentialStartup(app.Managed(server)),
+	)
+
+	done := make(chan error, 1)
+	go func() { done <- application.Run() }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Run() error = %v, want errors.Is(_, %v)", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not return after serve failure")
+	}
+}
+
+func TestServerUsesConfiguredLogger(t *testing.T) {
+	var output strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	server := New(
+		Config{Addr: "127.0.0.1:0"},
+		http.NotFoundHandler(),
+		WithLogger(logger),
+	)
+	ctx, _ := serverContext(t)
+	if err := server.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := server.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if got := output.String(); !strings.Contains(got, `"msg":"http server listening"`) {
+		t.Fatalf("log output = %q, want configured logger output", got)
+	}
 }
 
 func TestStopBeforeStart(t *testing.T) {
 	server := New(Config{}, http.NotFoundHandler())
 	if err := server.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func TestServerRejectsDuplicateStart(t *testing.T) {
+	server := New(Config{Addr: "127.0.0.1:0"}, http.NotFoundHandler())
+	ctx, _ := serverContext(t)
+	if err := server.Start(ctx); err != nil {
+		t.Fatalf("first Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	firstServer := server.server
+	firstAddr := server.Addr().String()
+	if err := server.Start(ctx); err == nil {
+		t.Fatal("second Start() error = nil, want already started error")
+	}
+	if server.server != firstServer || server.Addr().String() != firstAddr {
+		t.Fatal("second Start() replaced running server state")
 	}
 }
 

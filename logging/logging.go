@@ -51,18 +51,22 @@ func LevelFromVerbosity(v int) slog.Level {
 	}
 }
 
-func NewLogger(cfg Config) *slog.Logger {
-	return slog.New(NewHandler(cfg))
+func NewLogger(cfg Config) (*slog.Logger, error) {
+	handler, err := NewHandler(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return slog.New(handler), nil
 }
 
-func NewHandler(cfg Config) slog.Handler {
+func NewHandler(cfg Config) (slog.Handler, error) {
 	out := cfg.Output
 	if out == nil {
 		out = os.Stdout
 	}
 
 	replaceAttr := func(groups []string, a slog.Attr) slog.Attr {
-		if a.Key == slog.TimeKey {
+		if a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
 			a = slog.String(a.Key, a.Value.Time().UTC().Format(time.RFC3339Nano))
 		}
 		if a.Key == slog.SourceKey {
@@ -96,9 +100,9 @@ func NewHandler(cfg Config) slog.Handler {
 			handler = slog.NewJSONHandler(out, opts)
 		}
 	default:
-		panic(fmt.Sprintf("logging: unsupported format %q", cfg.Format))
+		return nil, fmt.Errorf("logging: unsupported format %q", cfg.Format)
 	}
-	return ContextHandler{next: handler}
+	return ContextHandler{next: handler}, nil
 }
 
 func newTintHandler(out io.Writer, cfg Config, replaceAttr func([]string, slog.Attr) slog.Attr) slog.Handler {
@@ -115,10 +119,13 @@ var isTerminal = func(out io.Writer) bool {
 	return ok && term.IsTerminal(int(file.Fd()))
 }
 
-func Setup(cfg Config) *slog.Logger {
-	logger := NewLogger(cfg)
+func Setup(cfg Config) (*slog.Logger, error) {
+	logger, err := NewLogger(cfg)
+	if err != nil {
+		return nil, err
+	}
 	slog.SetDefault(logger)
-	return logger
+	return logger, nil
 }
 
 func WithRequestID(ctx context.Context, requestID string) context.Context {

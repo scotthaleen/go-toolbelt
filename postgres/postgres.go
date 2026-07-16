@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/scotthaleen/go-app"
@@ -25,12 +26,20 @@ type Config struct {
 type Migrator func(context.Context, *sql.DB) error
 
 type Store struct {
-	cfg Config
-	db  *sql.DB
+	cfg     Config
+	mu      sync.RWMutex
+	db      *sql.DB
+	closing *closeState
+	open    func(string, string) (*sql.DB, error)
+}
+
+type closeState struct {
+	done chan struct{}
+	err  error
 }
 
 func New(cfg Config) *Store {
-	return &Store{cfg: cfg}
+	return &Store{cfg: cfg, open: sql.Open}
 }
 
 func (s *Store) Component() *app.Component {
@@ -41,14 +50,38 @@ func (s *Store) Component() *app.Component {
 	)
 }
 
-func (s *Store) DB() *sql.DB { return s.db }
+func (s *Store) DB() *sql.DB {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.db
+}
 
 func (s *Store) Start(ctx context.Context) error {
 	if s.cfg.DSN == "" {
 		return errors.New("postgres dsn is required")
 	}
+	s.mu.Lock()
+	if s.db != nil {
+		s.mu.Unlock()
+		return errors.New("postgres already started")
+	}
+	if s.closing != nil {
+		select {
+		case <-s.closing.done:
+			closeErr := s.closing.err
+			s.closing = nil
+			if closeErr != nil {
+				s.mu.Unlock()
+				return fmt.Errorf("previous postgres shutdown: %w", closeErr)
+			}
+		default:
+			s.mu.Unlock()
+			return errors.New("postgres shutdown in progress")
+		}
+	}
+	s.mu.Unlock()
 
-	db, err := sql.Open("pgx", s.cfg.DSN)
+	db, err := s.open("pgx", s.cfg.DSN)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
@@ -81,20 +114,41 @@ func (s *Store) Start(ctx context.Context) error {
 		}
 	}
 
+	s.mu.Lock()
 	s.db = db
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *Store) Stop(ctx context.Context) error {
-	if s.db == nil {
-		return nil
+	s.mu.Lock()
+	closing := s.closing
+	if closing == nil {
+		if s.db == nil {
+			s.mu.Unlock()
+			return nil
+		}
+		db := s.db
+		s.db = nil
+		closing = &closeState{done: make(chan struct{})}
+		s.closing = closing
+		s.mu.Unlock()
+		go func() {
+			closing.err = db.Close()
+			close(closing.done)
+		}()
+	} else {
+		s.mu.Unlock()
 	}
-	done := make(chan error, 1)
-	go func() { done <- s.db.Close() }()
 
 	select {
-	case err := <-done:
-		return err
+	case <-closing.done:
+		s.mu.Lock()
+		if s.closing == closing {
+			s.closing = nil
+		}
+		s.mu.Unlock()
+		return errors.Join(closing.err, ctx.Err())
 	case <-ctx.Done():
 		return ctx.Err()
 	}

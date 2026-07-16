@@ -13,7 +13,7 @@ import (
 
 func TestContextHandlerAddsRequestID(t *testing.T) {
 	var buf bytes.Buffer
-	logger := NewLogger(Config{Output: &buf, Format: FormatJSON, Verbosity: 1})
+	logger := newTestLogger(t, Config{Output: &buf, Format: FormatJSON, Verbosity: 1})
 	logger.InfoContext(WithRequestID(context.Background(), "req-123"), "hello")
 
 	got := buf.String()
@@ -64,7 +64,7 @@ func TestExplicitFormats(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			NewLogger(Config{Output: &buf, Format: tt.format, Verbosity: 1}).Info("hello")
+			newTestLogger(t, Config{Output: &buf, Format: tt.format, Verbosity: 1}).Info("hello")
 			if got := buf.String(); !strings.Contains(got, tt.want) {
 				t.Fatalf("log output = %q, want %q", got, tt.want)
 			}
@@ -78,14 +78,14 @@ func TestAutoFormatSelection(t *testing.T) {
 
 	var buf bytes.Buffer
 	isTerminal = func(io.Writer) bool { return false }
-	NewLogger(Config{Output: &buf, Format: FormatAuto, Verbosity: 1}).Info("json-output")
+	newTestLogger(t, Config{Output: &buf, Format: FormatAuto, Verbosity: 1}).Info("json-output")
 	if got := buf.String(); !strings.Contains(got, `"msg":"json-output"`) {
 		t.Fatalf("non-terminal output = %q, want JSON", got)
 	}
 
 	buf.Reset()
 	isTerminal = func(io.Writer) bool { return true }
-	NewLogger(Config{Output: &buf, Format: FormatAuto, Verbosity: 1}).Info("tint-output")
+	newTestLogger(t, Config{Output: &buf, Format: FormatAuto, Verbosity: 1}).Info("tint-output")
 	if got := buf.String(); !strings.Contains(got, "tint-output") || strings.Contains(got, `"msg"`) {
 		t.Fatalf("terminal output = %q, want Tint", got)
 	}
@@ -93,7 +93,7 @@ func TestAutoFormatSelection(t *testing.T) {
 
 func TestReplaceAttr(t *testing.T) {
 	var buf bytes.Buffer
-	logger := NewLogger(Config{
+	logger := newTestLogger(t, Config{
 		Output:    &buf,
 		Format:    FormatJSON,
 		Verbosity: 1,
@@ -112,7 +112,7 @@ func TestReplaceAttr(t *testing.T) {
 
 func TestSourceAndTimestampRewriting(t *testing.T) {
 	var buf bytes.Buffer
-	NewLogger(Config{Output: &buf, Format: FormatJSON, Verbosity: 1, AddSource: true}).Info("hello")
+	newTestLogger(t, Config{Output: &buf, Format: FormatJSON, Verbosity: 1, AddSource: true}).Info("hello")
 
 	var record struct {
 		Time   string `json:"time"`
@@ -133,18 +133,33 @@ func TestSourceAndTimestampRewriting(t *testing.T) {
 
 func TestContextHandlerOmitsEmptyRequestID(t *testing.T) {
 	var buf bytes.Buffer
-	logger := NewLogger(Config{Output: &buf, Format: FormatJSON, Verbosity: 1})
+	logger := newTestLogger(t, Config{Output: &buf, Format: FormatJSON, Verbosity: 1})
 	logger.InfoContext(WithRequestID(context.Background(), ""), "hello")
 	if got := buf.String(); strings.Contains(got, "request_id") {
 		t.Fatalf("log output = %q, want no request_id", got)
 	}
 }
 
-func TestUnsupportedFormatPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("NewHandler() did not panic for unsupported format")
-		}
-	}()
-	NewHandler(Config{Format: "invalid"})
+func TestUnsupportedFormatReturnsError(t *testing.T) {
+	if _, err := NewHandler(Config{Format: "invalid"}); err == nil {
+		t.Fatal("NewHandler() error = nil, want unsupported format error")
+	}
+}
+
+func TestTimeAttributeDoesNotPanic(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(t, Config{Output: &buf, Format: FormatJSON, Verbosity: 1})
+	logger.Info("event", "time", "unknown")
+	if got := buf.String(); !strings.Contains(got, `"time":"unknown"`) {
+		t.Fatalf("log output = %q, want user time attribute", got)
+	}
+}
+
+func newTestLogger(t *testing.T, cfg Config) *slog.Logger {
+	t.Helper()
+	logger, err := NewLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+	return logger
 }

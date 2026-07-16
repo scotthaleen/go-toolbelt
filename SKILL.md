@@ -56,6 +56,7 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
 - Use `sqlite.Config.Migrate` or `postgres.Config.Migrate` to integrate an
   application-owned versioned migration system such as Goose.
 - Use `httpserver` when an application supplies a standard `http.Handler`; the
-  application continues to own routing and middleware.
+  application continues to own routing and middleware. Pass the application's
+  logger through `httpserver.WithLogger` as well as `app.WithLogger`.
 - Use `logging.FormatAuto` for Tint on terminals and JSON elsewhere, or select
   `FormatTint`, `FormatText`, or `FormatJSON` explicitly.

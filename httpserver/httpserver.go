@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/scotthaleen/go-app"
@@ -32,6 +33,16 @@ func WithListener(listener net.Listener) Option {
 	}
 }
 
+// WithLogger sets the logger used for server lifecycle messages. A nil logger
+// is ignored.
+func WithLogger(logger *slog.Logger) Option {
+	return func(server *Server) {
+		if logger != nil {
+			server.logger = logger
+		}
+	}
+}
+
 // Server owns a standard-library HTTP server and its listener.
 type Server struct {
 	cfg       Config
@@ -39,6 +50,9 @@ type Server struct {
 	listener  net.Listener
 	server    *http.Server
 	serveDone chan struct{}
+	logger    *slog.Logger
+	errMu     sync.Mutex
+	serveErr  error
 }
 
 // New constructs a server. An empty address defaults to :8080.
@@ -49,7 +63,7 @@ func New(cfg Config, handler http.Handler, opts ...Option) *Server {
 	if handler == nil {
 		handler = http.NotFoundHandler()
 	}
-	server := &Server{cfg: cfg, handler: handler}
+	server := &Server{cfg: cfg, handler: handler, logger: slog.Default()}
 	for _, opt := range opts {
 		opt(server)
 	}
@@ -76,6 +90,9 @@ func (s *Server) Addr() net.Addr {
 
 // Start binds the listener and starts serving in the background.
 func (s *Server) Start(ctx context.Context) error {
+	if s.server != nil {
+		return errors.New("http server already started")
+	}
 	runtime := app.MustGet[app.RuntimeContext](ctx)
 	requestShutdown := app.MustGet[app.RequestShutdownFunc](ctx)
 
@@ -99,16 +116,20 @@ func (s *Server) Start(ctx context.Context) error {
 	s.server = server
 	serveDone := make(chan struct{})
 	s.serveDone = serveDone
+	logger := s.logger
 
 	go func() {
 		defer close(serveDone)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.ErrorContext(runtime, "http server failed", "reason", err)
+			s.errMu.Lock()
+			s.serveErr = err
+			s.errMu.Unlock()
+			logger.ErrorContext(runtime, "http server failed", "reason", err)
 			requestShutdown()
 		}
 	}()
 
-	slog.InfoContext(ctx, "http server listening", "addr", listener.Addr().String())
+	logger.InfoContext(ctx, "http server listening", "addr", listener.Addr().String())
 	return nil
 }
 
@@ -117,5 +138,16 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.server == nil {
 		return nil
 	}
-	return s.server.Shutdown(ctx)
+	shutdownErr := s.server.Shutdown(ctx)
+	if s.serveDone != nil {
+		select {
+		case <-s.serveDone:
+		case <-ctx.Done():
+			shutdownErr = errors.Join(shutdownErr, ctx.Err())
+		}
+	}
+	s.errMu.Lock()
+	serveErr := s.serveErr
+	s.errMu.Unlock()
+	return errors.Join(shutdownErr, serveErr)
 }

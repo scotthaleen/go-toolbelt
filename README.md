@@ -56,6 +56,14 @@ The server does not know about the job manager. The adapters resolve the depende
 
 ## Development
 
+This module targets Go 1.26.4. Consumers using an older Go version must update
+their declared version or enable the corresponding Go toolchain before adopting
+the module.
+
+The toolbelt intentionally remains a single Go module. Importing a subset of
+its packages may therefore add dependencies used by other packages to module
+resolution, although the Go linker excludes unused package code from binaries.
+
 ```sh
 task fmt
 task test

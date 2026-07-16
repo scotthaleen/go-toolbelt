@@ -47,7 +47,10 @@ func main() {
 			}
 		}
 	}
-	logger := logging.Setup(logging.Config{Verbosity: verbosity, AddSource: true})
+	logger, err := logging.Setup(logging.Config{Verbosity: verbosity, AddSource: true})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	store := sqlite.New(sqlite.Config{
 		Migrations: []string{

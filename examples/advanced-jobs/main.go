@@ -337,7 +337,10 @@ func scanLines(in io.Reader) (<-chan string, <-chan error) {
 
 func main() {
 	verbosity := countVerbosity(os.Args[1:])
-	logger := logging.Setup(logging.Config{Verbosity: verbosity, AddSource: true})
+	logger, err := logging.Setup(logging.Config{Verbosity: verbosity, AddSource: true})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	jobs := NewJobManager()
 	router := echoserver.NewRouter()
