@@ -3,6 +3,7 @@ package process
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -90,6 +91,21 @@ func TestRunCancelsOnContext(t *testing.T) {
 	}
 	if result.Err == nil {
 		t.Fatal("expected cancellation error")
+	}
+	if !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("result error = %v, want context.DeadlineExceeded", result.Err)
+	}
+}
+
+func TestRunSpecTimeoutPreservesDeadlineError(t *testing.T) {
+	spec := testSpec("sleep")
+	spec.Timeout = 100 * time.Millisecond
+	result := Run(context.Background(), spec)
+	if !result.Canceled {
+		t.Fatal("expected canceled result")
+	}
+	if !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("result error = %v, want context.DeadlineExceeded", result.Err)
 	}
 }
 

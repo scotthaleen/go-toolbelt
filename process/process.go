@@ -112,7 +112,7 @@ func Start(ctx context.Context, spec Spec, sinks ...Sink) (*Process, error) {
 		if cmd.Process == nil {
 			return nil
 		}
-		return cmd.Process.Signal(os.Interrupt)
+		return cancelProcess(cmd.Process)
 	}
 	cmd.WaitDelay = spec.KillTimeout
 	cmd.Dir = spec.Dir
@@ -157,7 +157,7 @@ func (p *Process) Stop() error {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	return p.cmd.Process.Signal(os.Interrupt)
+	return cancelProcess(p.cmd.Process)
 }
 
 func (p *Process) Kill() error {
@@ -171,6 +171,10 @@ func (p *Process) collect(ctx context.Context, cancel context.CancelFunc) {
 	defer cancel()
 
 	err := p.cmd.Wait()
+	resultErr := err
+	if ctx.Err() != nil {
+		resultErr = errors.Join(ctx.Err(), err)
+	}
 
 	ended := time.Now()
 	result := Result{
@@ -179,7 +183,7 @@ func (p *Process) collect(ctx context.Context, cancel context.CancelFunc) {
 		StartedAt: p.started,
 		EndedAt:   ended,
 		Canceled:  ctx.Err() != nil,
-		Err:       err,
+		Err:       resultErr,
 	}
 
 	eventType := EventCompleted
@@ -192,7 +196,7 @@ func (p *Process) collect(ctx context.Context, cancel context.CancelFunc) {
 		Type:     eventType,
 		PID:      result.PID,
 		ExitCode: result.ExitCode,
-		Err:      err,
+		Err:      resultErr,
 		Time:     ended,
 	})
 	p.result = result
