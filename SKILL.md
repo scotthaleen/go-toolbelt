@@ -60,3 +60,6 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
   logger through `httpserver.WithLogger` as well as `app.WithLogger`.
 - Use `logging.FormatAuto` for Tint on terminals and JSON elsewhere, or select
   `FormatTint`, `FormatText`, or `FormatJSON` explicitly.
+- Use `oidcverifier` for OIDC discovery and ID-token signature, issuer, expiry,
+  audience, and authorized-party validation. Start it before servers that rely
+  on it, and keep provider-specific authorization policy in the application.
