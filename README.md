@@ -12,6 +12,7 @@ Packages here may evolve faster than the stable `go-app` lifecycle core as appli
 - `eventbus`: typed, best-effort in-process event fan-out.
 - `httpserver`: router-independent standard-library HTTP server lifecycle.
 - `logging`: `log/slog` setup helpers, including `-v/-vv/-vvv` style verbosity mapping.
+- `oidcverifier`: lifecycle-managed OIDC discovery and ID-token verification.
 - `postgres`: a small `go-app` component that owns a Postgres `*sql.DB` lifecycle through `pgx`.
 - `process`: streaming process execution with event sinks and cancellation.
 - `sqlite`: a small `go-app` component that owns a SQLite `*sql.DB` lifecycle.
@@ -20,7 +21,8 @@ The SQLite and PostgreSQL components accept application-owned migration
 callbacks, allowing integration with Goose or another versioned migration
 system without requiring it as a toolbelt dependency. Logging supports Tint,
 plain text, and JSON, with automatic Tint output on terminals and JSON
-otherwise.
+otherwise. The OIDC verifier handles protocol validation and key rotation while
+leaving provider-specific identity authorization to applications.
 
 ## Documentation
 
