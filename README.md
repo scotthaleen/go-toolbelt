@@ -9,6 +9,7 @@ Packages here may evolve faster than the stable `go-app` lifecycle core as appli
 - `ai`: Charm Fantasy-backed AI client component.
 - `artifact`: content hash metadata and content-addressed filesystem staging.
 - `echoserver`: Echo router and HTTP server components.
+- `embeddednats`: embedded NATS server with ephemeral JetStream support.
 - `eventbus`: typed, best-effort in-process event fan-out.
 - `httpserver`: router-independent standard-library HTTP server lifecycle.
 - `logging`: `log/slog` setup helpers, including `-v/-vv/-vvv` style verbosity mapping.
@@ -55,6 +56,40 @@ The advanced jobs example demonstrates a capability component plus delivery adap
 - `echoserver.Server` only listens and serves the router.
 
 The server does not know about the job manager. The adapters resolve the dependencies they need during component startup, then runtime handlers use captured fields rather than reaching back into the app registry.
+
+## Embedded NATS
+
+The `embeddednats` package runs a NATS server in the application process. The
+default server enables JetStream and listens on a random loopback port:
+
+```go
+broker := embeddednats.New(embeddednats.Config{})
+
+a := app.New(ctx,
+	app.WithSequentialStartup(
+		app.Managed(broker),
+		app.Managed(natsAdapter),
+	),
+)
+```
+
+The dependent component can call `broker.Connect()` during its `Start` method,
+or it can pass `broker.ClientURL()` to code that already accepts a NATS URL.
+Drain client connections before the broker component stops. Production code can
+use the same client path with the URL of an external NATS cluster.
+
+NATS requires a writable JetStream store directory, including when all streams
+use memory storage. If `server.Options.StoreDir` is empty, `embeddednats`
+creates a private temporary directory and removes it after shutdown. Configure
+streams with `jetstream.MemoryStorage` to keep message data in memory. Supply a
+`StoreDir` to retain file-backed streams across restarts.
+
+Pass `server.Options` through `embeddednats.Config` to configure a fixed port,
+resource limits, authentication, TLS, or other NATS server behavior. Use
+`embeddednats.DefaultOptions()` as the starting point when you want to retain
+the package defaults. Set `DontListen` and use `ConnectInProcess` when a test
+must not open a TCP socket. The in-process path does not test TCP or TLS
+transport behavior.
 
 ## Development
 
