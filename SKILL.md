@@ -58,6 +58,10 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
 - Use `httpserver` when an application supplies a standard `http.Handler`; the
   application continues to own routing and middleware. Pass the application's
   logger through `httpserver.WithLogger` as well as `app.WithLogger`.
+- Use `embeddednats` for a local NATS server in tests or single-binary tools.
+  Prefer its normal client URL when application code must later switch to an
+  external NATS cluster. JetStream uses an automatically removed temporary
+  directory unless the application supplies a persistent store directory.
 - Use `logging.FormatAuto` for Tint on terminals and JSON elsewhere, or select
   `FormatTint`, `FormatText`, or `FormatJSON` explicitly.
 - Use `oidcverifier` for OIDC discovery and ID-token signature, issuer, expiry,
