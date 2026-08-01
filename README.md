@@ -17,6 +17,8 @@ Packages here may evolve faster than the stable `go-app` lifecycle core as appli
 - `postgres`: a small `go-app` component that owns a Postgres `*sql.DB` lifecycle through `pgx`.
 - `process`: streaming process execution with event sinks and cancellation.
 - `sqlite`: a small `go-app` component that owns a SQLite `*sql.DB` lifecycle.
+- `strictjson`: bounded, standard-library-only JSON decoding with recursive
+  duplicate-name rejection and redacted structural errors.
 
 The SQLite and PostgreSQL components accept application-owned migration
 callbacks, allowing integration with Goose or another versioned migration
@@ -24,6 +26,25 @@ system without requiring it as a toolbelt dependency. Logging supports Tint,
 plain text, and JSON, with automatic Tint output on terminals and JSON
 otherwise. The OIDC verifier handles protocol validation and key rotation while
 leaving provider-specific identity authorization to applications.
+
+Decode untrusted JSON with an explicit size limit and, when appropriate,
+unknown-field rejection:
+
+```go
+err := strictjson.DecodeReader(
+	r,
+	1<<20,
+	&request,
+	strictjson.DisallowUnknownFields(),
+)
+```
+
+`strictjson` scans nested objects iteratively, rejects escape-equivalent
+duplicate names, and exposes stable errors such as `ErrDuplicateName`,
+`ErrUnknownField`, `ErrInvalidJSON`, and `ErrTooLarge` without including JSON
+member names or values. Treat these as structural classifications for
+`errors.Is`; required-field, schema, semantic, authorization, and user-facing
+diagnostics remain application concerns.
 
 ## Documentation
 
