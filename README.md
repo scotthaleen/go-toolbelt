@@ -12,6 +12,7 @@ Packages here may evolve faster than the stable `go-app` lifecycle core as appli
 - `embeddednats`: embedded NATS server with ephemeral JetStream support.
 - `eventbus`: typed, best-effort in-process event fan-out.
 - `httpserver`: router-independent standard-library HTTP server lifecycle.
+- `localgateway`: protected local HTTP over Unix domain sockets or Windows named pipes.
 - `logging`: `log/slog` setup helpers, including `-v/-vv/-vvv` style verbosity mapping.
 - `oidcverifier`: lifecycle-managed OIDC discovery and ID-token verification.
 - `postgres`: a small `go-app` component that owns a Postgres `*sql.DB` lifecycle through `pgx`.
@@ -57,7 +58,14 @@ diagnostics remain application concerns.
 go run ./examples/sqlite -vvv
 go run ./examples/advanced-jobs -vvv
 OPENAI_API_KEY=... go run ./examples/ai-cli "write a haiku about app lifecycle"
+go run ./examples/localgateway-echo serve
+go run ./examples/localgateway-echo echo "hello"
 ```
+
+The local gateway example uses standard HTTP handlers and clients without
+opening a TCP port. Linux and macOS use a private Unix domain socket and verify
+same-user peers. Windows uses a named pipe restricted to the current user. Run
+`serve` in one terminal, then run `echo` in another terminal.
 
 Try the advanced jobs example with:
 

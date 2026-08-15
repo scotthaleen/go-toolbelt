@@ -50,6 +50,7 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
 - `examples/sqlite`: minimal lifecycle component usage.
 - `examples/advanced-jobs`: capability plus HTTP and CLI adapters.
 - `examples/ai-cli`: AI component wrapping Charm Fantasy for a single CLI prompt.
+- `examples/localgateway-echo`: standard HTTP over protected same-host IPC.
 
 ## Infrastructure Components
 
@@ -58,6 +59,11 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
 - Use `httpserver` when an application supplies a standard `http.Handler`; the
   application continues to own routing and middleware. Pass the application's
   logger through `httpserver.WithLogger` as well as `app.WithLogger`.
+- Use `localgateway` when a local CLI or process must call an application-owned
+  `http.Handler` without opening a TCP port. Linux and macOS use effective-user-
+  verified Unix domain sockets. Windows uses a current-user-only named pipe and
+  verifies the connected pipe owner's SID. Keep routes, body limits, protocol
+  versions, and application authorization in the application.
 - Use `embeddednats` for a local NATS server in tests or single-binary tools.
   Prefer its normal client URL when application code must later switch to an
   external NATS cluster. JetStream uses an automatically removed temporary
