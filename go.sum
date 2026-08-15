@@ -1,5 +1,7 @@
 charm.land/fantasy v0.35.0 h1:iFES7cnt3/o20T01+y2PDkHj5dHEWRFQH0vSXYzV8xo=
 charm.land/fantasy v0.35.0/go.mod h1:rUqUhunz+c6k66L0hHd51CrXB3SSzPNKkwBrzIe6XnY=
+github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
+github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya8AIOHIbWf7NGvO34QpLGclyf7nXj8=
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/charmbracelet/openai-go v0.0.0-20260617131321-5e4b9c18c4be h1:pg+OWlIkk9HOe/8P5J95aKe2wGDzFUiiyFOUpwR30B4=
