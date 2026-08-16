@@ -62,9 +62,12 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
 - Use `localgateway` when a local CLI or process must call an application-owned
   `http.Handler` without opening a TCP port. Linux and macOS use effective-user-
   verified Unix domain sockets. Windows uses a current-user-only named pipe and
-  verifies both connected client and server SIDs. The listener bounds active
-  connections before `net/http` starts per-connection goroutines, with a default
-  of 64, a hard maximum of 4096, and a configurable `WithMaxConnections` option.
+  verifies the client user SID on the server and the pipe owner SID on the client.
+  Windows clients from before v1.10 use anonymous impersonation and cannot connect
+  to v1.10 or newer servers; upgrade both ends together. The listener bounds
+  active connections before `net/http` starts per-connection goroutines, with a
+  default of 64, a hard maximum of 4096, and a configurable
+  `WithMaxConnections` option.
   Non-positive values and values above the maximum use the default. Shutdown
   blocks new application handler entry and waits for entered handlers even after
   forced connection closure. Handlers must observe request-context cancellation;

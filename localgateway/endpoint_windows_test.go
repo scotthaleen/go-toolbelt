@@ -4,8 +4,10 @@ package localgateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"testing"
@@ -46,7 +48,7 @@ func TestSameWindowsSID(t *testing.T) {
 	}
 }
 
-func TestGatewayRejectsAnonymousPipeClientAndRemainsUsable(t *testing.T) {
+func TestGatewayRejectsPreV110AnonymousPipeClientAndRemainsUsable(t *testing.T) {
 	endpoint := testEndpoint(t)
 	server := New(DefaultConfig(endpoint), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok")
@@ -82,3 +84,51 @@ func TestGatewayRejectsAnonymousPipeClientAndRemainsUsable(t *testing.T) {
 		t.Fatalf("verified client response = %q, err = %v", body, err)
 	}
 }
+
+func TestPeerListenerPropagatesVerifierFailure(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	wantErr := errors.New("verifier unavailable")
+	listener := peerListener{
+		Listener: &oneShotWindowsListener{conn: server},
+		verify:   func(net.Conn) error { return wantErr },
+	}
+	conn, err := listener.Accept()
+	if conn != nil || !errors.Is(err, wantErr) {
+		t.Fatalf("Accept() = (%v, %v), want (nil, verifier error)", conn, err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	var buffer [1]byte
+	if _, err := client.Read(buffer[:]); err == nil {
+		t.Fatal("rejected connection remained open")
+	}
+}
+
+type oneShotWindowsListener struct {
+	conn net.Conn
+}
+
+func (l *oneShotWindowsListener) Accept() (net.Conn, error) {
+	if l.conn == nil {
+		return nil, net.ErrClosed
+	}
+	conn := l.conn
+	l.conn = nil
+	return conn, nil
+}
+
+func (l *oneShotWindowsListener) Close() error {
+	if l.conn == nil {
+		return nil
+	}
+	err := l.conn.Close()
+	l.conn = nil
+	return err
+}
+
+func (*oneShotWindowsListener) Addr() net.Addr { return windowsTestAddr("pipe") }
+
+type windowsTestAddr string
+
+func (a windowsTestAddr) Network() string { return string(a) }
+func (a windowsTestAddr) String() string  { return string(a) }
