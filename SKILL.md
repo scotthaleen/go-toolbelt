@@ -79,6 +79,10 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
   file. Start the lock before protected components. It coordinates cooperative
   processes and does not defend against a malicious process running as the same
   OS user.
+- Use `privatedir.Ensure` for application-owned credential, state, and runtime
+  directories. It creates only the final path; establish parent and child
+  directories in explicit order. Existing unsafe paths are rejected rather
+  than silently chmodded or assigned a new ACL.
 - Use `strictjson.DecodeReader` with an application-selected positive size
   limit for untrusted JSON. Add `strictjson.DisallowUnknownFields()` when the
   destination must reject unknown members; perform required-field, semantic,

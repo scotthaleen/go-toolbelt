@@ -18,6 +18,7 @@ Packages here may evolve faster than the stable `go-app` lifecycle core as appli
 - `postgres`: a small `go-app` component that owns a Postgres `*sql.DB` lifecycle through `pgx`.
 - `process`: streaming process execution with event sinks and cancellation.
 - `processlock`: lifecycle-owned exclusive process locks for Linux, macOS, and Windows.
+- `privatedir`: current-user-private application directory creation and validation.
 - `sqlite`: a small `go-app` component that owns a SQLite `*sql.DB` lifecycle.
 - `strictjson`: bounded, standard-library-only JSON decoding with recursive
   duplicate-name rejection and redacted structural errors.
