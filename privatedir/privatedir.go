@@ -31,7 +31,7 @@ func Ensure(path string) error {
 	return ensure(path)
 }
 
-// Validate checks that path is a current-user-owned directory which untrusted
+// Validate checks that path is a current-user-private directory which untrusted
 // principals cannot read or mutate. It does not modify the path.
 func Validate(path string) error {
 	if path == "" {
