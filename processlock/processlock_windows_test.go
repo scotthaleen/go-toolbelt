@@ -55,3 +55,52 @@ func TestWindowsAllowsReadOnlyUntrustedPrincipal(t *testing.T) {
 		t.Fatalf("validation error = %v", err)
 	}
 }
+
+func TestWindowsAllowsTrustedOwners(t *testing.T) {
+	current, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ownerType := range []windows.WELL_KNOWN_SID_TYPE{
+		windows.WinLocalSystemSid,
+		windows.WinBuiltinAdministratorsSid,
+	} {
+		owner, err := windows.CreateWellKnownSid(ownerType)
+		if err != nil {
+			t.Fatal(err)
+		}
+		descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
+			"O:%sD:P(A;;GA;;;%s)",
+			owner,
+			current,
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateCurrentUserSecurity(descriptor, "test directory"); err != nil {
+			t.Fatalf("owner %s validation error = %v", owner, err)
+		}
+	}
+}
+
+func TestWindowsRejectsUntrustedOwner(t *testing.T) {
+	current, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
+		"O:%sD:P(A;;GA;;;%s)",
+		owner,
+		current,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCurrentUserSecurity(descriptor, "test directory"); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("validation error = %v, want ErrUnsafePath", err)
+	}
+}
