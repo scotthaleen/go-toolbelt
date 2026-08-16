@@ -17,7 +17,12 @@ import (
 
 var impersonateNamedPipeClient = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
 
-type peerListener struct{ net.Listener }
+var errPipeClientRejected = errors.New("Windows gateway pipe client rejected")
+
+type peerListener struct {
+	net.Listener
+	verify func(net.Conn) error
+}
 
 func (l peerListener) Accept() (net.Conn, error) {
 	for {
@@ -25,10 +30,14 @@ func (l peerListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := verifyCurrentUserPipeClient(conn); err == nil {
+		err = l.verify(conn)
+		if err == nil {
 			return conn, nil
 		}
 		_ = conn.Close()
+		if !errors.Is(err, errPipeClientRejected) {
+			return nil, err
+		}
 	}
 }
 
@@ -36,7 +45,11 @@ func listenLocal(endpoint string, inputBufferBytes, outputBufferBytes int32) (ne
 	if !strings.HasPrefix(strings.ToLower(endpoint), `\\.\pipe\`) {
 		return nil, nil, errors.New(`Windows gateway endpoint must start with \\.\pipe\`)
 	}
-	descriptor, err := currentUserSecurityDescriptor()
+	currentUser, err := currentUserSID()
+	if err != nil {
+		return nil, nil, err
+	}
+	descriptor, err := securityDescriptorForUser(currentUser)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -49,7 +62,12 @@ func listenLocal(endpoint string, inputBufferBytes, outputBufferBytes int32) (ne
 	if err != nil {
 		return nil, nil, err
 	}
-	return peerListener{Listener: listener}, nil, nil
+	return peerListener{
+		Listener: listener,
+		verify: func(conn net.Conn) error {
+			return verifyCurrentUserPipeClient(conn, currentUser)
+		},
+	}, nil, nil
 }
 
 func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
@@ -72,7 +90,7 @@ func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
 	return conn, nil
 }
 
-func verifyCurrentUserPipeClient(conn net.Conn) error {
+func verifyCurrentUserPipeClient(conn net.Conn, expected *windows.SID) error {
 	fd, ok := conn.(interface{ Fd() uintptr })
 	if !ok {
 		return errors.New("Windows gateway pipe handle is unavailable")
@@ -81,8 +99,7 @@ func verifyCurrentUserPipeClient(conn net.Conn) error {
 	if handle == 0 || handle == windows.InvalidHandle {
 		return errors.New("Windows gateway pipe handle is invalid")
 	}
-	expected, err := currentUserSID()
-	if err != nil {
+	if expected == nil || !expected.IsValid() {
 		return errors.New("current Windows user identity is unavailable")
 	}
 
@@ -93,21 +110,24 @@ func verifyCurrentUserPipeClient(conn net.Conn) error {
 		if callErr == syscall.Errno(0) {
 			callErr = syscall.EINVAL
 		}
-		return fmt.Errorf("identify Windows gateway client: %w", callErr)
+		return fmt.Errorf("%w: identify client: %v", errPipeClientRejected, callErr)
 	}
 	defer revertPipeClientImpersonation()
 
 	var token windows.Token
 	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token); err != nil {
-		return errors.New("Windows gateway client token is unavailable")
+		return fmt.Errorf("%w: client token is unavailable", errPipeClientRejected)
 	}
 	defer token.Close()
 	client, err := token.GetTokenUser()
-	if err != nil || client.User.Sid == nil || !client.User.Sid.IsValid() {
+	if err != nil {
+		return fmt.Errorf("read Windows gateway client identity: %w", err)
+	}
+	if client.User.Sid == nil || !client.User.Sid.IsValid() {
 		return errors.New("Windows gateway client identity is unavailable")
 	}
 	if !sameWindowsSID(client.User.Sid, expected) {
-		return errors.New("Windows gateway client belongs to another user")
+		return fmt.Errorf("%w: client belongs to another user", errPipeClientRejected)
 	}
 	return nil
 }
@@ -144,10 +164,9 @@ func verifyCurrentUserPipeServer(conn net.Conn) error {
 	return nil
 }
 
-func currentUserSecurityDescriptor() (string, error) {
-	user, err := currentUserSID()
-	if err != nil {
-		return "", err
+func securityDescriptorForUser(user *windows.SID) (string, error) {
+	if user == nil || !user.IsValid() {
+		return "", errors.New("current Windows user identity is unavailable")
 	}
 	return fmt.Sprintf("O:%[1]sD:P(A;;GA;;;%[1]s)", user.String()), nil
 }
