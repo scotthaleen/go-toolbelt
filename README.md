@@ -66,8 +66,18 @@ go run ./examples/localgateway-echo echo "hello"
 
 The local gateway example uses standard HTTP handlers and clients without
 opening a TCP port. Linux and macOS use a private Unix domain socket and verify
-same-user peers. Windows uses a named pipe restricted to the current user. Run
-`serve` in one terminal, then run `echo` in another terminal.
+same-user peers. Windows restricts the named pipe to the current user and
+verifies both connected client and server identities. The listener admits at
+most 64 active connections by default before `net/http` creates connection
+goroutines; use `localgateway.WithMaxConnections` when another bound is
+required, up to the hard maximum of 4096. Non-positive values and values above
+the maximum use the default. Shutdown prevents new application handler entry
+and waits for all entered handlers to exit, including after forced connection
+closure.
+Handlers must observe request-context cancellation; shutdown can wait beyond
+its deadline for a handler that does not exit. An entered handler must not call
+or wait for `Server.Stop`; it should request shutdown and return. Run `serve` in
+one terminal, then run `echo` in another terminal.
 
 Try the advanced jobs example with:
 

@@ -7,11 +7,30 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 )
+
+var impersonateNamedPipeClient = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
+
+type peerListener struct{ net.Listener }
+
+func (l peerListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyCurrentUserPipeClient(conn); err == nil {
+			return conn, nil
+		}
+		_ = conn.Close()
+	}
+}
 
 func listenLocal(endpoint string, inputBufferBytes, outputBufferBytes int32) (net.Listener, func() error, error) {
 	if !strings.HasPrefix(strings.ToLower(endpoint), `\\.\pipe\`) {
@@ -27,14 +46,22 @@ func listenLocal(endpoint string, inputBufferBytes, outputBufferBytes int32) (ne
 		InputBufferSize:    inputBufferBytes,
 		OutputBufferSize:   outputBufferBytes,
 	})
-	return listener, nil, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return peerListener{Listener: listener}, nil, nil
 }
 
 func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
 	if !strings.HasPrefix(strings.ToLower(endpoint), `\\.\pipe\`) {
 		return nil, errors.New(`Windows gateway endpoint must start with \\.\pipe\`)
 	}
-	conn, err := winio.DialPipeContext(ctx, endpoint)
+	conn, err := winio.DialPipeAccessImpLevel(
+		ctx,
+		endpoint,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		winio.PipeImpLevelIdentification,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -43,6 +70,58 @@ func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
 		return nil, err
 	}
 	return conn, nil
+}
+
+func verifyCurrentUserPipeClient(conn net.Conn) error {
+	fd, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return errors.New("Windows gateway pipe handle is unavailable")
+	}
+	handle := windows.Handle(fd.Fd())
+	if handle == 0 || handle == windows.InvalidHandle {
+		return errors.New("Windows gateway pipe handle is invalid")
+	}
+	expected, err := currentUserSID()
+	if err != nil {
+		return errors.New("current Windows user identity is unavailable")
+	}
+
+	runtime.LockOSThread()
+	impersonated, _, callErr := impersonateNamedPipeClient.Call(uintptr(handle))
+	if impersonated == 0 {
+		runtime.UnlockOSThread()
+		if callErr == syscall.Errno(0) {
+			callErr = syscall.EINVAL
+		}
+		return fmt.Errorf("identify Windows gateway client: %w", callErr)
+	}
+	defer revertPipeClientImpersonation()
+
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token); err != nil {
+		return errors.New("Windows gateway client token is unavailable")
+	}
+	defer token.Close()
+	client, err := token.GetTokenUser()
+	if err != nil || client.User.Sid == nil || !client.User.Sid.IsValid() {
+		return errors.New("Windows gateway client identity is unavailable")
+	}
+	if !sameWindowsSID(client.User.Sid, expected) {
+		return errors.New("Windows gateway client belongs to another user")
+	}
+	return nil
+}
+
+func revertPipeClientImpersonation() {
+	if err := windows.RevertToSelf(); err != nil {
+		// Continuing could run unrelated goroutines on a client-impersonating thread.
+		panic(fmt.Errorf("revert Windows gateway client impersonation: %w", err))
+	}
+	runtime.UnlockOSThread()
+}
+
+func sameWindowsSID(left, right *windows.SID) bool {
+	return left != nil && right != nil && left.IsValid() && right.IsValid() && left.Equals(right)
 }
 
 func verifyCurrentUserPipeServer(conn net.Conn) error {
@@ -59,7 +138,7 @@ func verifyCurrentUserPipeServer(conn net.Conn) error {
 		return errors.New("Windows gateway server owner is unavailable")
 	}
 	currentUser, err := currentUserSID()
-	if err != nil || !serverUser.Equals(currentUser) {
+	if err != nil || !sameWindowsSID(serverUser, currentUser) {
 		return errors.New("Windows gateway server belongs to another user")
 	}
 	return nil
