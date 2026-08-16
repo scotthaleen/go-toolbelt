@@ -9,4 +9,7 @@
 // The package checks the final path object. The caller is responsible for
 // choosing a stable path on a local filesystem. The cooperative threat model
 // does not protect against a malicious process running as the same OS user.
+// Creation permits an integrity-protected parent, including a non-writable
+// mode-0755 user directory or a Unix sticky temporary directory; the created
+// directory itself always satisfies the stricter confidentiality policy.
 package privatedir

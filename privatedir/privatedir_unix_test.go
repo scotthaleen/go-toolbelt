@@ -28,6 +28,32 @@ func TestEnsureRestoresModeUnderRestrictiveUmask(t *testing.T) {
 	}
 }
 
+func TestEnsureAcceptsIntegrityProtectedCreationParents(t *testing.T) {
+	for _, mode := range []os.FileMode{0o755, 0o777 | os.ModeSticky} {
+		parent := t.TempDir()
+		if err := os.Chmod(parent, mode); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(parent, "private")
+		if err := Ensure(path); err != nil {
+			t.Fatalf("Ensure under mode %o: %v", mode, err)
+		}
+		if err := Validate(path); err != nil {
+			t.Fatalf("Validate under mode %o: %v", mode, err)
+		}
+	}
+}
+
+func TestEnsureRejectsReplaceableCreationParent(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := Ensure(filepath.Join(parent, "private")); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("Ensure error = %v, want ErrUnsafe", err)
+	}
+}
+
 func TestRejectsUnsafeExistingPath(t *testing.T) {
 	parent := privateTempDir(t)
 	public := filepath.Join(parent, "public")
