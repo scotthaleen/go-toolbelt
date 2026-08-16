@@ -17,6 +17,7 @@ Packages here may evolve faster than the stable `go-app` lifecycle core as appli
 - `oidcverifier`: lifecycle-managed OIDC discovery and ID-token verification.
 - `postgres`: a small `go-app` component that owns a Postgres `*sql.DB` lifecycle through `pgx`.
 - `process`: streaming process execution with event sinks and cancellation.
+- `processlock`: lifecycle-owned exclusive process locks for Linux, macOS, and Windows.
 - `sqlite`: a small `go-app` component that owns a SQLite `*sql.DB` lifecycle.
 - `strictjson`: bounded, standard-library-only JSON decoding with recursive
   duplicate-name rejection and redacted structural errors.

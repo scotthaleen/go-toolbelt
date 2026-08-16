@@ -73,6 +73,12 @@ Startup shape is explicit and caller-owned. Use `app.WithConcurrentStartup` only
 - Use `oidcverifier` for OIDC discovery and ID-token signature, issuer, expiry,
   audience, and authorized-party validation. Start it before servers that rely
   on it, and keep provider-specific authorization policy in the application.
+- Use `processlock` before a single-owner local database, IPC endpoint, or other
+  process-exclusive resource. Put the lock in a private, stable, local-filesystem
+  directory owned by the current user; never remove or replace an active lock
+  file. Start the lock before protected components. It coordinates cooperative
+  processes and does not defend against a malicious process running as the same
+  OS user.
 - Use `strictjson.DecodeReader` with an application-selected positive size
   limit for untrusted JSON. Add `strictjson.DisallowUnknownFields()` when the
   destination must reject unknown members; perform required-field, semantic,
