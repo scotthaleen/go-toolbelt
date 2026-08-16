@@ -12,8 +12,8 @@ import (
 )
 
 func ensure(path string) error {
-	if err := validate(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("validate private parent: %w", err)
+	if err := validateCreationParent(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("validate creation parent: %w", err)
 	}
 	err := os.Mkdir(path, 0o700)
 	switch {
@@ -34,6 +34,21 @@ func ensure(path string) error {
 	default:
 		return err
 	}
+}
+
+func validateCreationParent(path string) error {
+	var stat unix.Stat_t
+	if err := unix.Lstat(path, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return fmt.Errorf("%w: parent is not a directory", ErrUnsafe)
+	}
+	stickyTrusted := stat.Mode&unix.S_ISVTX != 0 && (stat.Uid == 0 || stat.Uid == uint32(os.Geteuid()))
+	if stat.Mode&0o022 == 0 || stickyTrusted {
+		return nil
+	}
+	return fmt.Errorf("%w: parent permits unsafe replacement", ErrUnsafe)
 }
 
 func validate(path string) error {

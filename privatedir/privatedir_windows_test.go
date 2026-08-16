@@ -159,3 +159,49 @@ func TestWindowsAllowsTrustedPrincipals(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWindowsCreationParentAllowsReadAndRejectsMutation(t *testing.T) {
+	current, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	world, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		access  string
+		wantErr bool
+	}{
+		{name: "read", access: "GR"},
+		{name: "write", access: "GW", wantErr: true},
+		{name: "delete child", access: "0x00000040", wantErr: true},
+		{name: "inherited write", access: "GW", wantErr: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			flags := ""
+			if test.name == "inherited write" {
+				flags = "OICIIO"
+			}
+			descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
+				"O:%sD:P(A;;GA;;;%s)(A;%s;%s;;;%s)",
+				current,
+				current,
+				flags,
+				test.access,
+				world,
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateCreationSecurity(descriptor)
+			if test.wantErr && !errors.Is(err, ErrUnsafe) {
+				t.Fatalf("validation error = %v, want ErrUnsafe", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
+	}
+}
