@@ -63,14 +63,37 @@ func TestGatewayRequiresEndpoint(t *testing.T) {
 	}
 }
 
-func TestGatewayStopRetriesAfterDeadline(t *testing.T) {
+func TestGatewayConnectionLimitOption(t *testing.T) {
+	_ = Config{"", "", 0, 0, 0, 0, 0, 0, 0}
+
+	server := New(Config{Endpoint: testEndpoint(t)}, nil)
+	if server.maxConnections != DefaultMaxConnections {
+		t.Fatalf("default maxConnections = %d", server.maxConnections)
+	}
+
+	server = New(Config{Endpoint: testEndpoint(t)}, nil, WithMaxConnections(7))
+	if server.maxConnections != 7 {
+		t.Fatalf("configured maxConnections = %d", server.maxConnections)
+	}
+
+	for _, value := range []int{0, -1, MaxConnections + 1} {
+		server = New(Config{Endpoint: testEndpoint(t)}, nil, WithMaxConnections(value))
+		if server.maxConnections != DefaultMaxConnections {
+			t.Fatalf("WithMaxConnections(%d) = %d", value, server.maxConnections)
+		}
+	}
+}
+
+func TestGatewayForcedCloseWaitsForHandlerExit(t *testing.T) {
 	endpoint := testEndpoint(t)
 	started := make(chan struct{})
-	release := make(chan struct{})
-	server := New(DefaultConfig(endpoint), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	canceled := make(chan struct{})
+	releaseExit := make(chan struct{})
+	server := New(DefaultConfig(endpoint), http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		close(started)
-		<-release
-		_, _ = io.WriteString(w, "late")
+		<-r.Context().Done()
+		close(canceled)
+		<-releaseExit
 	}))
 	ctx, _ := gatewayContext(t)
 	if err := server.Start(ctx); err != nil {
@@ -91,11 +114,28 @@ func TestGatewayStopRetriesAfterDeadline(t *testing.T) {
 		t.Fatal("request did not start")
 	}
 	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	if err := server.Stop(stopCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("first Stop() error = %v", err)
+	defer cancel()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- server.Stop(stopCtx) }()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("forced close did not cancel request context")
 	}
-	cancel()
-	close(release)
+	select {
+	case err := <-stopDone:
+		t.Fatalf("Stop returned before handler exit: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseExit)
+	select {
+	case err := <-stopDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Stop() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after handler exit")
+	}
 	select {
 	case <-requestDone:
 	case <-time.After(time.Second):

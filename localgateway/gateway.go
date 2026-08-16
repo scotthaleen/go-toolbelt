@@ -16,6 +16,8 @@ import (
 const (
 	DefaultPipeBufferBytes = 64 << 10
 	MaxPipeBufferBytes     = 16 << 20
+	DefaultMaxConnections  = 64
+	MaxConnections         = 4096
 	BaseURL                = "http://local.gateway"
 )
 
@@ -58,20 +60,30 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithMaxConnections bounds transport connections accepted by the gateway.
+// Values outside 1 through MaxConnections use DefaultMaxConnections.
+func WithMaxConnections(max int) Option {
+	return func(server *Server) {
+		server.maxConnections = normalizeMaxConnections(max)
+	}
+}
+
 // Server owns a protected local listener and standard-library HTTP server.
 type Server struct {
-	cfg       Config
-	handler   http.Handler
-	logger    *slog.Logger
-	listener  net.Listener
-	cleanup   func() error
-	server    *http.Server
-	serveDone chan struct{}
-	mu        sync.Mutex
-	stopping  bool
-	stopped   bool
-	errMu     sync.Mutex
-	serveErr  error
+	cfg            Config
+	handler        http.Handler
+	logger         *slog.Logger
+	listener       net.Listener
+	cleanup        func() error
+	server         *http.Server
+	serveDone      chan struct{}
+	mu             sync.Mutex
+	stopping       bool
+	stopped        bool
+	errMu          sync.Mutex
+	serveErr       error
+	handlers       handlerGate
+	maxConnections int
 }
 
 // New constructs a local gateway. Endpoint validation occurs during startup.
@@ -97,11 +109,23 @@ func New(cfg Config, handler http.Handler, opts ...Option) *Server {
 	if handler == nil {
 		handler = http.NotFoundHandler()
 	}
-	server := &Server{cfg: cfg, handler: handler, logger: slog.Default()}
+	server := &Server{
+		cfg:            cfg,
+		handler:        handler,
+		logger:         slog.Default(),
+		maxConnections: DefaultMaxConnections,
+	}
 	for _, opt := range opts {
 		opt(server)
 	}
 	return server
+}
+
+func normalizeMaxConnections(max int) int {
+	if max <= 0 || max > MaxConnections {
+		return DefaultMaxConnections
+	}
+	return max
 }
 
 func pipeBufferSize(value int32) int32 {
@@ -142,10 +166,11 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen for %s: %w", s.cfg.Name, err)
 	}
+	listener = newAdmissionListener(listener, s.maxConnections)
 	s.listener = listener
 	s.cleanup = cleanup
 	server := &http.Server{
-		Handler:           s.handler,
+		Handler:           &gatedHandler{gate: &s.handlers, handler: s.handler},
 		ReadTimeout:       s.cfg.ReadTimeout,
 		ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
 		WriteTimeout:      s.cfg.WriteTimeout,
@@ -171,8 +196,12 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down HTTP, closes the listener, and removes the Unix
-// socket when applicable. It is safe to call more than once.
+// Stop prevents new application handler entry, shuts down HTTP, waits for every
+// entered handler to exit, and removes the Unix socket when applicable. A
+// handler that ignores request cancellation can make Stop wait beyond ctx. Stop
+// is safe to call more than once. An entered handler must not call or wait for
+// Stop because Stop waits for entered handlers; request shutdown and return
+// instead.
 func (s *Server) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,6 +209,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		return nil
 	}
 	s.stopping = true
+	s.handlers.stop()
 	var result error
 	if s.server != nil {
 		if err := s.server.Shutdown(ctx); err != nil {
@@ -192,12 +222,9 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 	if s.serveDone != nil {
-		select {
-		case <-s.serveDone:
-		case <-ctx.Done():
-			result = errors.Join(result, ctx.Err())
-		}
+		<-s.serveDone
 	}
+	s.handlers.wait()
 	if s.cleanup != nil {
 		if err := s.cleanup(); err != nil {
 			result = errors.Join(result, err)
@@ -212,6 +239,63 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.stopped = true
 	}
 	return result
+}
+
+type handlerGate struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	stopping bool
+	active   int
+}
+
+func (g *handlerGate) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopping {
+		return false
+	}
+	g.active++
+	return true
+}
+
+func (g *handlerGate) leave() {
+	g.mu.Lock()
+	g.active--
+	if g.active == 0 && g.cond != nil {
+		g.cond.Broadcast()
+	}
+	g.mu.Unlock()
+}
+
+func (g *handlerGate) stop() {
+	g.mu.Lock()
+	g.stopping = true
+	g.mu.Unlock()
+}
+
+func (g *handlerGate) wait() {
+	g.mu.Lock()
+	if g.cond == nil {
+		g.cond = sync.NewCond(&g.mu)
+	}
+	for g.active != 0 {
+		g.cond.Wait()
+	}
+	g.mu.Unlock()
+}
+
+type gatedHandler struct {
+	gate    *handlerGate
+	handler http.Handler
+}
+
+func (h *gatedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !h.gate.enter() {
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	defer h.gate.leave()
+	h.handler.ServeHTTP(w, r)
 }
 
 // ClientConfig configures the HTTP client bound to a local endpoint.
