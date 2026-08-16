@@ -107,8 +107,10 @@ func TestWindowsCreatedDirectoryHasProtectedInheritedUserACL(t *testing.T) {
 	if !sid.IsValid() || !sid.Equals(current) {
 		t.Fatalf("created directory ACE belongs to %v, want current user", sid)
 	}
-	if ace.Mask&windows.GENERIC_ALL != windows.GENERIC_ALL {
-		t.Fatalf("created directory ACE mask = %#x, want GENERIC_ALL", ace.Mask)
+	// Windows maps GENERIC_ALL from the SDDL to concrete file rights.
+	const fileAllAccess = 0x001f01ff
+	if ace.Mask&fileAllAccess != fileAllAccess {
+		t.Fatalf("created directory ACE mask = %#x, want FILE_ALL_ACCESS", ace.Mask)
 	}
 	if header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) != windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE {
 		t.Fatalf("ACE flags = %#x", header.AceFlags)
