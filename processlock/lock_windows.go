@@ -128,7 +128,7 @@ func validateCurrentUserSecurity(descriptor *windows.SECURITY_DESCRIPTOR, object
 		return err
 	}
 	owner, defaulted, err := descriptor.Owner()
-	if err != nil || owner == nil || defaulted || !owner.IsValid() || !owner.Equals(currentUser) {
+	if err != nil || owner == nil || defaulted || !owner.IsValid() || !isTrustedWindowsPrincipal(owner, currentUser) {
 		return fmt.Errorf("%w: %s belongs to another user", ErrUnsafePath, object)
 	}
 	dacl, _, err := descriptor.DACL()
@@ -147,7 +147,7 @@ func validateCurrentUserSecurity(descriptor *windows.SECURITY_DESCRIPTOR, object
 			if !sid.IsValid() {
 				return fmt.Errorf("%w: %s has an invalid access control entry", ErrUnsafePath, object)
 			}
-			if sid.Equals(currentUser) || sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			if isTrustedWindowsPrincipal(sid, currentUser) {
 				continue
 			}
 			if header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&mutationRights == 0 {
@@ -162,6 +162,12 @@ func validateCurrentUserSecurity(descriptor *windows.SECURITY_DESCRIPTOR, object
 		}
 	}
 	return nil
+}
+
+func isTrustedWindowsPrincipal(sid, currentUser *windows.SID) bool {
+	return sid.Equals(currentUser) ||
+		sid.IsWellKnown(windows.WinLocalSystemSid) ||
+		sid.IsWellKnown(windows.WinBuiltinAdministratorsSid)
 }
 
 const mutationRights = windows.GENERIC_WRITE |
