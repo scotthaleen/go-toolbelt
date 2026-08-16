@@ -47,7 +47,7 @@ func validate(path string) error {
 	if err != nil {
 		return err
 	}
-	return validateCurrentUserSecurity(descriptor)
+	return validatePrivateSecurity(descriptor)
 }
 
 func directorySecurityDescriptor(path string) (*windows.SECURITY_DESCRIPTOR, error) {
@@ -86,7 +86,7 @@ func directorySecurityDescriptor(path string) (*windows.SECURITY_DESCRIPTOR, err
 	return descriptor, nil
 }
 
-func validateCurrentUserSecurity(descriptor *windows.SECURITY_DESCRIPTOR) error {
+func validatePrivateSecurity(descriptor *windows.SECURITY_DESCRIPTOR) error {
 	if descriptor == nil || !descriptor.IsValid() {
 		return fmt.Errorf("%w: security descriptor is unavailable", ErrUnsafe)
 	}
@@ -95,7 +95,7 @@ func validateCurrentUserSecurity(descriptor *windows.SECURITY_DESCRIPTOR) error 
 		return err
 	}
 	owner, defaulted, err := descriptor.Owner()
-	if err != nil || owner == nil || defaulted || !owner.IsValid() || !owner.Equals(currentUser) {
+	if err != nil || owner == nil || defaulted || !trustedSID(owner, currentUser) {
 		return fmt.Errorf("%w: directory belongs to another user", ErrUnsafe)
 	}
 	dacl, _, err := descriptor.DACL()
@@ -114,7 +114,7 @@ func validateCurrentUserSecurity(descriptor *windows.SECURITY_DESCRIPTOR) error 
 			if !sid.IsValid() {
 				return fmt.Errorf("%w: invalid access control entry", ErrUnsafe)
 			}
-			if sid.Equals(currentUser) || sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			if trustedSID(sid, currentUser) {
 				continue
 			}
 			return fmt.Errorf("%w: directory grants access to another user", ErrUnsafe)
@@ -135,7 +135,7 @@ func validateCreationSecurity(descriptor *windows.SECURITY_DESCRIPTOR) error {
 		return err
 	}
 	owner, defaulted, err := descriptor.Owner()
-	if err != nil || owner == nil || defaulted || !owner.IsValid() || !owner.Equals(currentUser) {
+	if err != nil || owner == nil || defaulted || !trustedSID(owner, currentUser) {
 		return fmt.Errorf("%w: parent belongs to another user", ErrUnsafe)
 	}
 	dacl, _, err := descriptor.DACL()
@@ -154,7 +154,7 @@ func validateCreationSecurity(descriptor *windows.SECURITY_DESCRIPTOR) error {
 			if !sid.IsValid() {
 				return fmt.Errorf("%w: parent has an invalid access control entry", ErrUnsafe)
 			}
-			if sid.Equals(currentUser) || sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			if trustedSID(sid, currentUser) {
 				continue
 			}
 			if header.AceFlags&windows.INHERIT_ONLY_ACE == 0 && ace.Mask&mutationRights != 0 {
@@ -166,6 +166,11 @@ func validateCreationSecurity(descriptor *windows.SECURITY_DESCRIPTOR) error {
 		}
 	}
 	return nil
+}
+
+func trustedSID(sid, currentUser *windows.SID) bool {
+	return sid != nil && sid.IsValid() &&
+		(sid.Equals(currentUser) || sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid))
 }
 
 func currentUserSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {

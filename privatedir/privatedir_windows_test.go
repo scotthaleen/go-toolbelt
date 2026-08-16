@@ -32,7 +32,7 @@ func TestWindowsRejectsUntrustedAccess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := validateCurrentUserSecurity(descriptor); !errors.Is(err, ErrUnsafe) {
+		if err := validatePrivateSecurity(descriptor); !errors.Is(err, ErrUnsafe) {
 			t.Fatalf("validation error = %v, want ErrUnsafe", err)
 		}
 	}
@@ -43,16 +43,19 @@ func TestWindowsRejectsWrongOwnerAndNonDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	world, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;;GA;;;%s)", admins, current))
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;;GA;;;%s)", world, current))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateCurrentUserSecurity(descriptor); !errors.Is(err, ErrUnsafe) {
+	if err := validatePrivateSecurity(descriptor); !errors.Is(err, ErrUnsafe) {
 		t.Fatalf("wrong-owner error = %v, want ErrUnsafe", err)
+	}
+	if err := validateCreationSecurity(descriptor); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("wrong creation-owner error = %v, want ErrUnsafe", err)
 	}
 
 	file := filepath.Join(privateTempDir(t), "file")
@@ -84,7 +87,7 @@ func TestWindowsCreatedDirectoryHasProtectedInheritedUserACL(t *testing.T) {
 	if control&windows.SE_DACL_PROTECTED == 0 {
 		t.Fatal("created directory DACL is not protected")
 	}
-	if err := validateCurrentUserSecurity(descriptor); err != nil {
+	if err := validatePrivateSecurity(descriptor); err != nil {
 		t.Fatal(err)
 	}
 	dacl, _, err := descriptor.DACL()
@@ -117,6 +120,16 @@ func TestWindowsCreatedDirectoryHasProtectedInheritedUserACL(t *testing.T) {
 	}
 }
 
+func TestWindowsCreatesUnderTestTempDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private")
+	if err := Ensure(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWindowsRejectsReparsePoint(t *testing.T) {
 	parent := privateTempDir(t)
 	target := filepath.Join(parent, "target")
@@ -145,18 +158,23 @@ func TestWindowsAllowsTrustedPrincipals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
-		"O:%sD:P(A;;GA;;;%s)(A;;GA;;;%s)(A;;GA;;;%s)",
-		current,
-		current,
-		system,
-		admins,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateCurrentUserSecurity(descriptor); err != nil {
-		t.Fatal(err)
+	for _, owner := range []*windows.SID{current, system, admins} {
+		descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
+			"O:%sD:P(A;;GA;;;%s)(A;;GA;;;%s)(A;;GA;;;%s)",
+			owner,
+			current,
+			system,
+			admins,
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validatePrivateSecurity(descriptor); err != nil {
+			t.Fatalf("validate private owner %s: %v", owner, err)
+		}
+		if err := validateCreationSecurity(descriptor); err != nil {
+			t.Fatalf("validate creation owner %s: %v", owner, err)
+		}
 	}
 }
 

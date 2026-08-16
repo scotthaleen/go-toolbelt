@@ -2,7 +2,8 @@
 // directories on Linux, macOS, and Windows.
 //
 // Private means that no untrusted principal has read or mutation access. On
-// Windows, SYSTEM and the built-in Administrators group are trusted exceptions.
+// Windows, SYSTEM and the built-in Administrators group are trusted access and
+// ownership exceptions.
 // Inheritable access entries for other principals are rejected because they can
 // affect application-owned children.
 //
