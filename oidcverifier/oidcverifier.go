@@ -6,20 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/scotthaleen/go-app"
+	"github.com/scotthaleen/go-toolbelt/strictjson"
 )
 
 const (
-	defaultMaxTokenBytes = 64 * 1024
-	maxJWKSBytes         = 1024 * 1024
+	defaultMaxTokenBytes     = 64 * 1024
+	maxProviderMetadataBytes = 1024 * 1024
+	maxJWKSBytes             = 1024 * 1024
 )
 
 var supportedAlgorithms = []jose.SignatureAlgorithm{
@@ -66,6 +70,17 @@ type Config struct {
 	MaxTokenBytes int
 }
 
+// ProviderMetadata contains the validated OIDC endpoints needed by clients.
+type ProviderMetadata struct {
+	Issuer                string
+	AuthorizationEndpoint string
+	TokenEndpoint         string
+	JWKSURL               string
+	ResponseTypes         []string
+	CodeChallengeMethods  []string
+	SigningAlgorithms     []string
+}
+
 type options struct {
 	httpClient *http.Client
 }
@@ -95,6 +110,7 @@ type Verifier struct {
 	mu       sync.RWMutex
 	started  bool
 	stopped  bool
+	metadata ProviderMetadata
 	verifier *oidc.IDTokenVerifier
 }
 
@@ -160,6 +176,134 @@ func validateIssuer(issuer string) error {
 	return nil
 }
 
+// Discover retrieves bounded provider metadata and validates its issuer and
+// HTTPS endpoints. The caller retains ownership of client and its transport.
+func Discover(ctx context.Context, issuer string, client *http.Client) (ProviderMetadata, error) {
+	if err := validateIssuer(issuer); err != nil {
+		return ProviderMetadata{}, err
+	}
+	if client == nil {
+		return ProviderMetadata{}, errors.New("oidc discovery HTTP client cannot be nil")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(issuer, "/")+"/.well-known/openid-configuration", nil)
+	if err != nil {
+		return ProviderMetadata{}, fmt.Errorf("create oidc discovery request: %w", err)
+	}
+	discoveryClient := *client
+	checkRedirect := client.CheckRedirect
+	discoveryClient.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if request.URL.Scheme != "https" {
+			return errors.New("oidc discovery redirect must use HTTPS")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(request, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	response, err := discoveryClient.Do(request)
+	if err != nil {
+		return ProviderMetadata{}, fmt.Errorf("request oidc provider metadata: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return ProviderMetadata{}, fmt.Errorf("oidc discovery endpoint returned %s", response.Status)
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return ProviderMetadata{}, errors.New("oidc discovery endpoint returned a non-JSON content type")
+	}
+	var document struct {
+		Issuer                string   `json:"issuer"`
+		AuthorizationEndpoint string   `json:"authorization_endpoint"`
+		TokenEndpoint         string   `json:"token_endpoint"`
+		JWKSURL               string   `json:"jwks_uri"`
+		ResponseTypes         []string `json:"response_types_supported"`
+		SubjectTypes          []string `json:"subject_types_supported"`
+		CodeChallengeMethods  []string `json:"code_challenge_methods_supported"`
+		SigningAlgorithms     []string `json:"id_token_signing_alg_values_supported"`
+	}
+	if err := strictjson.DecodeReader(response.Body, maxProviderMetadataBytes, &document); err != nil {
+		return ProviderMetadata{}, fmt.Errorf("decode oidc provider metadata: %w", err)
+	}
+	if document.Issuer != issuer {
+		return ProviderMetadata{}, errors.New("oidc provider metadata issuer does not match configured issuer")
+	}
+	if err := validateEndpoint("authorization", document.AuthorizationEndpoint); err != nil {
+		return ProviderMetadata{}, err
+	}
+	if document.TokenEndpoint != "" {
+		if err := validateEndpoint("token", document.TokenEndpoint); err != nil {
+			return ProviderMetadata{}, err
+		}
+	}
+	if len(document.ResponseTypes) == 0 {
+		return ProviderMetadata{}, errors.New("oidc provider returned no supported response type")
+	}
+	if supportsCodeFlow(document.ResponseTypes) && document.TokenEndpoint == "" {
+		return ProviderMetadata{}, errors.New("oidc provider omitted the token endpoint required for code flow")
+	}
+	if len(document.SubjectTypes) == 0 {
+		return ProviderMetadata{}, errors.New("oidc provider returned no supported subject type")
+	}
+	if err := validateStringValues("response type", document.ResponseTypes); err != nil {
+		return ProviderMetadata{}, err
+	}
+	if err := validateStringValues("subject type", document.SubjectTypes); err != nil {
+		return ProviderMetadata{}, err
+	}
+	if err := validateStringValues("code challenge method", document.CodeChallengeMethods); err != nil {
+		return ProviderMetadata{}, err
+	}
+	if err := validateEndpoint("JWKS", document.JWKSURL); err != nil {
+		return ProviderMetadata{}, err
+	}
+	if err := validateStringValues("ID-token signing algorithm", document.SigningAlgorithms); err != nil {
+		return ProviderMetadata{}, err
+	}
+	if !slices.Contains(document.SigningAlgorithms, string(jose.RS256)) {
+		return ProviderMetadata{}, errors.New("oidc provider does not support required RS256 ID-token signing")
+	}
+	algorithms := filterSupportedAlgorithms(document.SigningAlgorithms)
+	if len(algorithms) == 0 {
+		return ProviderMetadata{}, errors.New("oidc provider returned no supported ID-token signing algorithm")
+	}
+	return ProviderMetadata{
+		Issuer:                document.Issuer,
+		AuthorizationEndpoint: document.AuthorizationEndpoint,
+		TokenEndpoint:         document.TokenEndpoint,
+		JWKSURL:               document.JWKSURL,
+		ResponseTypes:         slices.Clone(document.ResponseTypes),
+		CodeChallengeMethods:  slices.Clone(document.CodeChallengeMethods),
+		SigningAlgorithms:     algorithms,
+	}, nil
+}
+
+func supportsCodeFlow(responseTypes []string) bool {
+	for _, responseType := range responseTypes {
+		if slices.Contains(strings.Fields(responseType), "code") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateStringValues(name string, values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" {
+			return fmt.Errorf("oidc provider returned an empty %s", name)
+		}
+		if _, exists := seen[value]; exists {
+			return fmt.Errorf("oidc provider returned a duplicate %s", name)
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
 func valueSet(name string, values []string, required bool) (map[string]struct{}, error) {
 	if required && len(values) == 0 {
 		return nil, fmt.Errorf("oidc verifier requires at least one %s", name)
@@ -208,23 +352,13 @@ func (v *Verifier) Start(ctx context.Context) error {
 	v.started = true
 	v.mu.Unlock()
 
-	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, v.httpClient), v.cfg.Issuer)
+	metadata, err := Discover(ctx, v.cfg.Issuer, v.httpClient)
 	if err != nil {
 		return fmt.Errorf("discover oidc provider: %w", err)
 	}
-	var metadata struct {
-		JWKSURL    string   `json:"jwks_uri"`
-		Algorithms []string `json:"id_token_signing_alg_values_supported"`
-	}
-	if err := provider.Claims(&metadata); err != nil {
-		return fmt.Errorf("decode oidc provider metadata: %w", err)
-	}
-	if err := validateJWKSURL(metadata.JWKSURL); err != nil {
-		return err
-	}
 	algorithms := slices.Clone(v.cfg.SigningAlgorithms)
 	if len(algorithms) == 0 {
-		algorithms = filterSupportedAlgorithms(metadata.Algorithms)
+		algorithms = slices.Clone(metadata.SigningAlgorithms)
 	}
 	verifier := oidc.NewVerifier(v.cfg.Issuer, &remoteKeySet{
 		url:    metadata.JWKSURL,
@@ -239,6 +373,7 @@ func (v *Verifier) Start(ctx context.Context) error {
 	if v.stopped {
 		return ErrNotReady
 	}
+	v.metadata = cloneMetadata(metadata)
 	v.verifier = verifier
 	return nil
 }
@@ -247,9 +382,20 @@ func (v *Verifier) Start(ctx context.Context) error {
 func (v *Verifier) Stop(context.Context) error {
 	v.mu.Lock()
 	v.stopped = true
+	v.metadata = ProviderMetadata{}
 	v.verifier = nil
 	v.mu.Unlock()
 	return nil
+}
+
+// Metadata returns validated discovery metadata after startup.
+func (v *Verifier) Metadata() (ProviderMetadata, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if v.verifier == nil {
+		return ProviderMetadata{}, ErrNotReady
+	}
+	return cloneMetadata(v.metadata), nil
 }
 
 // Ready reports whether discovery completed and verification is available.
@@ -310,12 +456,19 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Token, error) 
 	}, nil
 }
 
-func validateJWKSURL(rawURL string) error {
+func validateEndpoint(name, rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-		return errors.New("oidc provider returned an invalid HTTPS JWKS URL")
+		return fmt.Errorf("oidc provider returned an invalid HTTPS %s endpoint", name)
 	}
 	return nil
+}
+
+func cloneMetadata(metadata ProviderMetadata) ProviderMetadata {
+	metadata.ResponseTypes = slices.Clone(metadata.ResponseTypes)
+	metadata.CodeChallengeMethods = slices.Clone(metadata.CodeChallengeMethods)
+	metadata.SigningAlgorithms = slices.Clone(metadata.SigningAlgorithms)
+	return metadata
 }
 
 func filterSupportedAlgorithms(values []string) []string {

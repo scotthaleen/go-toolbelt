@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +62,9 @@ func TestVerifierLifecycle(t *testing.T) {
 	if _, err := verifier.Verify(context.Background(), "token"); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("Verify() error = %v, want ErrNotReady", err)
 	}
+	if _, err := verifier.Metadata(); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Metadata() error = %v, want ErrNotReady", err)
+	}
 	if got := verifier.Component().Name(); got != "oidc-verifier" {
 		t.Fatalf("Component().Name() = %q", got)
 	}
@@ -70,6 +74,18 @@ func TestVerifierLifecycle(t *testing.T) {
 	}
 	if !verifier.Ready() {
 		t.Fatal("Ready() = false after Start")
+	}
+	metadata, err := verifier.Metadata()
+	if err != nil {
+		t.Fatalf("Metadata() error = %v", err)
+	}
+	if metadata.Issuer != issuer.server.URL || metadata.AuthorizationEndpoint != issuer.server.URL+"/authorize" || metadata.TokenEndpoint != issuer.server.URL+"/token" || metadata.JWKSURL != issuer.server.URL+"/keys" {
+		t.Fatalf("Metadata() = %+v", metadata)
+	}
+	metadata.SigningAlgorithms[0] = "changed"
+	metadata, err = verifier.Metadata()
+	if err != nil || !slices.Equal(metadata.SigningAlgorithms, []string{"RS256"}) {
+		t.Fatalf("Metadata() clone = %+v, %v", metadata, err)
 	}
 	if err := verifier.Start(context.Background()); !errors.Is(err, ErrAlreadyStarted) {
 		t.Fatalf("second Start() error = %v, want ErrAlreadyStarted", err)
@@ -85,6 +101,107 @@ func TestVerifierLifecycle(t *testing.T) {
 	}
 	if _, err := verifier.Verify(context.Background(), "token"); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("Verify() after Stop error = %v, want ErrNotReady", err)
+	}
+	if _, err := verifier.Metadata(); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Metadata() after Stop error = %v, want ErrNotReady", err)
+	}
+}
+
+func TestDiscoverValidatesProviderMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		change func(map[string]any)
+		body   string
+		status int
+		media  string
+		valid  bool
+	}{
+		{name: "valid", valid: true},
+		{name: "implicit only", valid: true, change: func(document map[string]any) {
+			delete(document, "token_endpoint")
+			document["response_types_supported"] = []string{"id_token"}
+		}},
+		{name: "wrong issuer", change: func(document map[string]any) { document["issuer"] = "https://other.example" }},
+		{name: "HTTP authorization endpoint", change: func(document map[string]any) { document["authorization_endpoint"] = "http://issuer.example/authorize" }},
+		{name: "missing token endpoint", change: func(document map[string]any) { delete(document, "token_endpoint") }},
+		{name: "hybrid flow missing token endpoint", change: func(document map[string]any) {
+			delete(document, "token_endpoint")
+			document["response_types_supported"] = []string{"code id_token"}
+		}},
+		{name: "fragmented JWKS endpoint", change: func(document map[string]any) { document["jwks_uri"] = "https://issuer.example/keys#fragment" }},
+		{name: "unsupported algorithms", change: func(document map[string]any) { document["id_token_signing_alg_values_supported"] = []string{"none"} }},
+		{name: "missing required RS256", change: func(document map[string]any) { document["id_token_signing_alg_values_supported"] = []string{"ES256"} }},
+		{name: "duplicate member", body: `{"issuer":"first","issuer":"second"}`},
+		{name: "oversized", body: strings.Repeat(" ", maxProviderMetadataBytes+1)},
+		{name: "wrong content type", media: "text/plain"},
+		{name: "error status", status: http.StatusBadGateway},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var server *httptest.Server
+			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				mediaType := test.media
+				if mediaType == "" {
+					mediaType = "application/json"
+				}
+				w.Header().Set("Content-Type", mediaType)
+				if test.status != 0 {
+					w.WriteHeader(test.status)
+					return
+				}
+				if test.body != "" {
+					_, _ = w.Write([]byte(test.body))
+					return
+				}
+				document := map[string]any{
+					"issuer":                                server.URL,
+					"authorization_endpoint":                server.URL + "/authorize",
+					"token_endpoint":                        server.URL + "/token",
+					"jwks_uri":                              server.URL + "/keys",
+					"response_types_supported":              []string{"code"},
+					"subject_types_supported":               []string{"public"},
+					"code_challenge_methods_supported":      []string{"S256"},
+					"id_token_signing_alg_values_supported": []string{"RS256"},
+				}
+				if test.change != nil {
+					test.change(document)
+				}
+				_ = json.NewEncoder(w).Encode(document)
+			}))
+			defer server.Close()
+
+			metadata, err := Discover(context.Background(), server.URL, server.Client())
+			if test.valid {
+				if err != nil {
+					t.Fatalf("Discover() error = %v", err)
+				}
+				wantTokenEndpoint := server.URL + "/token"
+				if test.name == "implicit only" {
+					wantTokenEndpoint = ""
+				}
+				if metadata.Issuer != server.URL || metadata.AuthorizationEndpoint != server.URL+"/authorize" || metadata.TokenEndpoint != wantTokenEndpoint || metadata.JWKSURL != server.URL+"/keys" || !slices.Equal(metadata.SigningAlgorithms, []string{"RS256"}) {
+					t.Fatalf("Discover() = %+v", metadata)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Discover() = %+v, want error", metadata)
+			}
+		})
+	}
+}
+
+func TestDiscoverRejectsInsecureRedirect(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://issuer.example/.well-known/openid-configuration", http.StatusFound)
+	}))
+	defer server.Close()
+
+	if _, err := Discover(context.Background(), server.URL, server.Client()); err == nil {
+		t.Fatal("Discover() error = nil")
 	}
 }
 
@@ -164,9 +281,14 @@ func TestVerifyCancelsJWKSRequest(t *testing.T) {
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"issuer":                                server.URL,
+				"authorization_endpoint":                server.URL + "/authorize",
+				"token_endpoint":                        server.URL + "/token",
 				"jwks_uri":                              server.URL + "/keys",
+				"response_types_supported":              []string{"code"},
+				"subject_types_supported":               []string{"public"},
 				"id_token_signing_alg_values_supported": []string{"RS256"},
 			})
 		case "/keys":
@@ -377,6 +499,7 @@ func newTestIssuer(t *testing.T) *testIssuer {
 func (i *testIssuer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/.well-known/openid-configuration":
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issuer":                                i.server.URL,
 			"authorization_endpoint":                i.server.URL + "/authorize",

@@ -27,7 +27,8 @@ The SQLite and PostgreSQL components accept application-owned migration
 callbacks, allowing integration with Goose or another versioned migration
 system without requiring it as a toolbelt dependency. Logging supports Tint,
 plain text, and JSON, with automatic Tint output on terminals and JSON
-otherwise. The OIDC verifier handles protocol validation and key rotation while
+otherwise. The OIDC verifier performs bounded discovery, exposes validated
+provider endpoints, and handles protocol validation and key rotation while
 leaving provider-specific identity authorization to applications.
 
 Decode untrusted JSON with an explicit size limit and, when appropriate,
