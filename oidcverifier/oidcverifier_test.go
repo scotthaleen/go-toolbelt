@@ -16,9 +16,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/scotthaleen/go-app"
 )
 
@@ -205,6 +207,21 @@ func TestDiscoverRejectsInsecureRedirect(t *testing.T) {
 	}
 }
 
+func TestDiscoverPreservesIssuerMismatchError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"issuer":"https://other.example"}`))
+	}))
+	defer server.Close()
+
+	_, err := Discover(context.Background(), server.URL, server.Client())
+	var mismatch *oidc.IssuerMismatchError
+	if !errors.As(err, &mismatch) || mismatch.Provided != server.URL || mismatch.Discovered != "https://other.example" {
+		t.Fatalf("Discover() error = %v, mismatch = %+v", err, mismatch)
+	}
+}
+
 func TestComponentStartsAndStopsInApplicationOrder(t *testing.T) {
 	issuer := newTestIssuer(t)
 	verifier := issuer.verifier(t, Config{Name: "company-oidc", Audiences: []string{"client"}})
@@ -338,6 +355,46 @@ func TestVerifyCancelsJWKSRequest(t *testing.T) {
 	case <-requestCanceled:
 	case <-time.After(time.Second):
 		t.Fatal("JWKS HTTP request was not canceled")
+	}
+}
+
+func TestVerifyRejectsJWKSRedirectDowngrade(t *testing.T) {
+	t.Parallel()
+	key := newRSAKey(t)
+	var insecureRequests atomic.Int32
+	insecure := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		insecureRequests.Add(1)
+	}))
+	defer insecure.Close()
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"issuer": server.URL, "authorization_endpoint": server.URL + "/authorize", "token_endpoint": server.URL + "/token", "jwks_uri": server.URL + "/keys",
+				"response_types_supported": []string{"code"}, "subject_types_supported": []string{"public"}, "id_token_signing_alg_values_supported": []string{"RS256"},
+			})
+		case "/keys":
+			http.Redirect(w, r, insecure.URL+"/keys", http.StatusTemporaryRedirect)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	verifier, err := New(Config{Issuer: server.URL, Audiences: []string{"client"}}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	raw := signToken(t, key, "key-1", map[string]any{"iss": server.URL, "sub": "subject", "aud": "client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix()})
+	if _, err := verifier.Verify(context.Background(), raw); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("Verify() error = %v, want ErrInvalidToken", err)
+	}
+	if insecureRequests.Load() != 0 {
+		t.Fatal("JWKS redirect downgrade was followed")
 	}
 }
 
