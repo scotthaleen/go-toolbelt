@@ -189,20 +189,7 @@ func Discover(ctx context.Context, issuer string, client *http.Client) (Provider
 	if err != nil {
 		return ProviderMetadata{}, fmt.Errorf("create oidc discovery request: %w", err)
 	}
-	discoveryClient := *client
-	checkRedirect := client.CheckRedirect
-	discoveryClient.CheckRedirect = func(request *http.Request, via []*http.Request) error {
-		if request.URL.Scheme != "https" {
-			return errors.New("oidc discovery redirect must use HTTPS")
-		}
-		if checkRedirect != nil {
-			return checkRedirect(request, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
+	discoveryClient := httpsOnlyClient(client)
 	response, err := discoveryClient.Do(request)
 	if err != nil {
 		return ProviderMetadata{}, fmt.Errorf("request oidc provider metadata: %w", err)
@@ -229,7 +216,7 @@ func Discover(ctx context.Context, issuer string, client *http.Client) (Provider
 		return ProviderMetadata{}, fmt.Errorf("decode oidc provider metadata: %w", err)
 	}
 	if document.Issuer != issuer {
-		return ProviderMetadata{}, errors.New("oidc provider metadata issuer does not match configured issuer")
+		return ProviderMetadata{}, &oidc.IssuerMismatchError{Provided: issuer, Discovered: document.Issuer}
 	}
 	if err := validateEndpoint("authorization", document.AuthorizationEndpoint); err != nil {
 		return ProviderMetadata{}, err
@@ -279,6 +266,24 @@ func Discover(ctx context.Context, issuer string, client *http.Client) (Provider
 		CodeChallengeMethods:  slices.Clone(document.CodeChallengeMethods),
 		SigningAlgorithms:     algorithms,
 	}, nil
+}
+
+func httpsOnlyClient(client *http.Client) *http.Client {
+	clone := *client
+	checkRedirect := client.CheckRedirect
+	clone.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if request.URL.Scheme != "https" {
+			return errors.New("oidc endpoint redirect must use HTTPS")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(request, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &clone
 }
 
 func supportsCodeFlow(responseTypes []string) bool {
@@ -362,7 +367,7 @@ func (v *Verifier) Start(ctx context.Context) error {
 	}
 	verifier := oidc.NewVerifier(v.cfg.Issuer, &remoteKeySet{
 		url:    metadata.JWKSURL,
-		client: v.httpClient,
+		client: httpsOnlyClient(v.httpClient),
 	}, &oidc.Config{
 		SkipClientIDCheck:    true,
 		SupportedSigningAlgs: algorithms,
